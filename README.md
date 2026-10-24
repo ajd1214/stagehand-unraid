@@ -81,6 +81,14 @@ Turning Stagehand off never affects playback. Plex keeps reading whichever copy 
 
 With `MANAGE_MOVER_IGNORE="yes"`, Stagehand keeps a marked block of its cached files in Mover Tuning's ignore file so the mover leaves them alone until Stagehand releases them. Lines outside the block are never touched. This only works when Mover Tuning's "ignore files listed inside of a text file" option is on; `check` warns when it is off.
 
+## Leftover (orphan) files
+
+When a file exists on both the pool and the array, Unraid serves the pool copy, and a delete, rename or overwrite through `/mnt/user` changes **only the pool copy** (tested on Unraid 7.3.4). So if Sonarr, Radarr or Maintainerr deletes, upgrades or renames a title while Stagehand has it cached, the old array copy becomes visible again.
+
+Every run checks for tracked pool copies that disappeared without Stagehand deleting them. Each one is logged as `ORPHAN`, sent as an Unraid notification and listed by `stagehand.sh status`. Stagehand does not delete these array files: a mover run can produce the same picture (pool copy gone, array copy present) when the array copy is the real one. Check in Sonarr or Radarr before deleting.
+
+A same-name replacement (for example a repack) writes the new file to the pool and leaves the old array copy. `clean` sees the size difference, keeps the pool file and stops tracking it.
+
 ## Known limits
 
 - The live switch uses `gdb` to attach to `shfs`, the process that serves every user share. While attached, `shfs` pauses briefly. Stage 1 logs the measured pause for every switch so it can be judged before scheduled use. `GDB_TIMEOUT_SECONDS` caps it.

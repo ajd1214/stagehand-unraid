@@ -51,9 +51,11 @@ source <(tr -d '\r' < "$CFG")
 : "${MEDIASERVER_CONTAINER:=plex}" "${PATH_MAP:=auto}" "${MANAGE_MOVER_IGNORE:=no}"
 : "${MOVER_IGNORE_FILE:=/mnt/user/system/mover/mover_ignore.txt}"
 : "${MOVER_TUNING_CFG:=/boot/config/plugins/ca.mover.tuning/ca.mover.tuning.cfg}"
-: "${SOURCE_ROOTS:=auto}" "${ALLOW_OTHER_POOL:=no}"
+: "${SOURCE_ROOTS:=auto}" "${ALLOW_OTHER_POOL:=no}" "${ORPHAN_ACTION:=report}"
 
-ITEMS="$STATE_DIR/items.tsv"     # pool_path  share  rel  size  copied_epoch  last_played_epoch  reason
+ITEMS="$STATE_DIR/items.tsv"     # pool_path  share  rel  size  copied_epoch  last_played_epoch  reason  array_mtime
+ORPHANS="$STATE_DIR/orphans.tsv" # array_path  share  rel  size  array_mtime  detected_epoch  status
+WARNED="$STATE_DIR/warned.tsv"   # key  epoch  (rate-limits repeating warnings)
 SEEN="$STATE_DIR/seen.tsv"       # share/rel  first_seen  last_seen
 LOCK="$STATE_DIR/stagehand.lock"
 NOW=$(date +%s)
@@ -271,14 +273,23 @@ share_pool_ok() {  # target pool must be the share's primary pool unless ALLOW_O
 }
 
 ########## state ##########
-state_init() { mkdir -p "$STATE_DIR" && touch "$ITEMS" "$SEEN"; }
+state_init() { mkdir -p "$STATE_DIR" && touch "$ITEMS" "$SEEN" "$ORPHANS" "$WARNED"; }
+
+warn_once() {  # key message : log a WARN at most once per 24 hours per key
+  local key="$1"; shift
+  local last tmp="$WARNED.tmp.$$"
+  last=$(awk -F'\t' -v k="$key" '$1==k{print $2; exit}' "$WARNED" 2>/dev/null)
+  [ -n "$last" ] && [ $((NOW - last)) -lt 86400 ] && return 0
+  log WARN "$*"
+  { awk -F'\t' -v k="$key" '$1!=k' "$WARNED"; printf '%s\t%s\n' "$key" "$NOW"; } > "$tmp" && mv -f "$tmp" "$WARNED"
+}
 
 item_get() { awk -F'\t' -v p="$1" '$1==p' "$ITEMS"; }
 
-item_upsert() {  # pool share rel size copied last reason
+item_upsert() {  # pool share rel size copied last reason array_mtime
   local tmp="$ITEMS.tmp.$$"
   awk -F'\t' -v p="$1" '$1!=p' "$ITEMS" > "$tmp"
-  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$@" >> "$tmp"
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$@" >> "$tmp"
   mv -f "$tmp" "$ITEMS"
 }
 
@@ -437,7 +448,7 @@ handle_title() {  # state server_path
     return
   fi
 
-  share_pool_ok "$share" || { log WARN "share $share does not use $POOL as primary pool; skipping (ALLOW_OTHER_POOL=no)"; return; }
+  share_pool_ok "$share" || { warn_once "pool:$share" "share $share does not use $POOL as its primary pool; skipping its titles (ALLOW_OTHER_POOL=no)"; return; }
 
   if [ -f "$dst" ]; then
     # Already cached. Keep it alive and retry the switch if playback is still on the array.
@@ -464,7 +475,7 @@ handle_title() {  # state server_path
     switch_playback "$arr" "$dst" "$rel"
   else
     copy_to_pool "$arr" "$dst" "$share" "$rel" || return
-    item_upsert "$dst" "$share" "$rel" "$size" "$NOW" "$NOW" "playing"
+    item_upsert "$dst" "$share" "$rel" "$size" "$NOW" "$NOW" "playing" "$(stat -c %Y "$arr")"
     switch_playback "$arr" "$dst" "$rel"
   fi
   copy_next_episodes "$share" "$rel"
@@ -488,12 +499,37 @@ copy_next_episodes() {  # share rel
     pool_has_room "$size" || { log WARN "not enough free space for next episode: $dir/$f"; break; }
     budget=$((budget - size))
     if [ $DRY -eq 1 ]; then log COPY "would copy next episode $(( size / 1048576 )) MB: $dir/$f"
-    else copy_to_pool "$arr" "$dst" "$share" "$dir/$f" && item_upsert "$dst" "$share" "$dir/$f" "$size" "$NOW" "$NOW" "next"; fi
+    else copy_to_pool "$arr" "$dst" "$share" "$dir/$f" && item_upsert "$dst" "$share" "$dir/$f" "$size" "$NOW" "$NOW" "next" "$(stat -c %Y "$arr")"; fi
   done < <(ls -1 "/mnt/user/$share/$dir" 2>/dev/null | LC_ALL=C sort | awk -v b="$base" 'f{print} $0==b{f=1}')
+}
+
+########## orphans ##########
+# A tracked pool copy that vanished without Stagehand deleting it was removed or renamed
+# through /mnt/user (Sonarr/Radarr upgrade or rename, Maintainerr, a manual delete) or moved
+# by the mover. Unraid deletes and renames only the pool copy, so the array copy becomes
+# visible again. Stagehand reports it; it never deletes array files.
+check_orphans() {
+  local pool share rel size copied last reason amt arr
+  while IFS=$'\t' read -r pool share rel size copied last reason amt; do
+    [ -z "$pool" ] && continue
+    [ -f "$pool" ] && continue
+    arr=$(array_copy "$share" "$rel")
+    if [ -z "$arr" ]; then
+      log INFO "removed from pool and array, nothing left behind: $rel"
+      [ $DRY -eq 0 ] && item_drop "$pool"; continue
+    fi
+    log WARN "ORPHAN: pool copy disappeared but the array copy is still there and visible again: $arr (if Sonarr/Radarr/Maintainerr deleted, upgraded or renamed it, this array file is a leftover; if the mover moved it, it is the real copy)"
+    notify warning "Stagehand: possible leftover file" "Array copy visible again after the pool copy disappeared: $arr"
+    if [ $DRY -eq 0 ]; then
+      printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$arr" "$share" "$rel" "$size" "${amt:-}" "$NOW" "reported" >> "$ORPHANS"
+      item_drop "$pool"
+    fi
+  done < <(cat "$ITEMS")
 }
 
 cmd_run() {
   local out st sp
+  check_orphans
   if ! out=$(get_sessions); then log ERROR "$out"; return 1; fi
   [ -z "$out" ] && { seen_prune; return 0; }
   while IFS=$'\t' read -r st sp; do
@@ -514,10 +550,11 @@ remove_empty_dirs() {  # share reldir : rmdir upward while empty, stop at the sh
 
 cmd_clean() {
   local opens pool share rel size copied last reason hrs arr kept=0 rel_n=0
+  check_orphans
   opens=$(open_targets)
-  while IFS=$'\t' read -r pool share rel size copied last reason; do
+  while IFS=$'\t' read -r pool share rel size copied last reason _; do
     [ -z "$pool" ] && continue
-    if [ ! -f "$pool" ]; then log INFO "no longer on pool (moved or deleted elsewhere), forgetting: $rel"; [ $DRY -eq 0 ] && item_drop "$pool"; continue; fi
+    [ -f "$pool" ] || continue   # handled by check_orphans
     hrs=$(keep_hours_for "$rel")
     if [ $((NOW - last)) -lt $((hrs * 3600)) ]; then kept=$((kept + 1)); continue; fi
     arr=$(array_copy "$share" "$rel")
@@ -602,11 +639,20 @@ cmd_explain() {  # read-only: show how each active session would be handled and 
 cmd_status() {
   local pool share rel size copied last reason
   printf '%-8s %-8s %8s  %s\n' "age_h" "idle_h" "MB" "item"
-  while IFS=$'\t' read -r pool share rel size copied last reason; do
+  while IFS=$'\t' read -r pool share rel size copied last reason _; do
     [ -z "$pool" ] && continue
     printf '%-8s %-8s %8s  %s/%s [%s]%s\n' $(( (NOW - copied) / 3600 )) $(( (NOW - last) / 3600 )) $(( size / 1048576 )) \
       "$share" "$rel" "$reason" "$( [ -f "$pool" ] || echo ' (missing)')"
   done < "$ITEMS"
+  local arr amt det st n=0
+  while IFS=$'\t' read -r arr share rel size amt det st; do
+    [ -z "$arr" ] && continue
+    [ "$st" = "reported" ] || continue
+    if [ -f "$arr" ] && [ ! -f "$(pool_path "$share" "$rel")" ]; then
+      [ $n -eq 0 ] && echo && echo "Possible leftover array files (pool copy disappeared; check in Sonarr/Radarr before deleting):"
+      n=$((n + 1)); echo "  $(date -d "@$det" '+%F %R')  $arr"
+    fi
+  done < "$ORPHANS"
 }
 
 ########## main ##########

@@ -144,4 +144,4 @@ Stagehand is inspired by and builds on the design of [Cache Mover (Media Caching
 
 ## License
 
-MIT. See [LICENSE](LICENSE).
+MIT. See [LICENSE](LICENSE). The bundled gdb package is GPLv3+; see [NOTICE.md](NOTICE.md) for third-party licenses and the acknowledgment of Cache Mover.

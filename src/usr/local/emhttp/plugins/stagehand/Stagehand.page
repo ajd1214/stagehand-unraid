@@ -84,6 +84,46 @@ $sections = [
     ['MEDIASERVER3_CONTAINER', 'Docker container name', 'text', 'The server container as named on the Docker tab. Used to read its folder mappings (and the token for Plex).'],
     ['PATH_MAP3', 'Path map', 'text', 'auto, or server_path=&gt;host_path; ...'],
   ],
+  'Leftover array files' => [
+    ['ORPHAN_ACTION', 'Leftover array files', ['report', 'delete'], 'When Sonarr, Radarr, Maintainerr or you delete, upgrade or rename a title while it is on the SSD, Unraid removes only the SSD copy and the OLD file on the array shows up again in Plex. Stagehand asks Sonarr/Radarr whether they still track that file. report = list confirmed leftovers on the Lists tab, delete nothing. <b>delete = also DELETE confirmed leftovers from the array.</b> <b style=\'color:#e22\'>Danger:</b> this deletes media files from your array, and nothing can bring them back. It only deletes when Sonarr/Radarr say they no longer track the file, Mover Tuning\'s ignore list is on, the file is unchanged since it was cached, nothing is playing it and the wait below has passed. Files that no Sonarr/Radarr manages are never deleted. Use report for a while first and check what it lists.'],
+    ['ORPHAN_GRACE_MIN', 'Wait before deleting (minutes)', 'text', 'Time between finding a leftover and deleting it, so Sonarr/Radarr can finish what they were doing.'],
+  ],
+  'Sonarr / Radarr 1' => [
+    ['ARR1_TYPE', 'Type', ['none', 'sonarr', 'radarr'], 'Each Sonarr or Radarr you run, one per slot (for example three Sonarr and one Radarr). Only used to tell real files from leftovers. none = slot unused.'],
+    ['ARR1_URL', 'Address', 'text', 'How Stagehand reaches it from Unraid, for example http://127.0.0.1:8989 (Sonarr) or http://127.0.0.1:7878 (Radarr).'],
+    ['ARR1_KEY', 'API key', 'password', 'auto = read it from the container (config.xml). Or paste it from Settings &gt; General in Sonarr/Radarr.'],
+    ['ARR1_CONTAINER', 'Docker container name', 'text', 'As named on the Docker tab. Used to translate its folders to Unraid paths, and for the auto API key.'],
+  ],
+  'Sonarr / Radarr 2' => [
+    ['ARR2_TYPE', 'Type', ['none', 'sonarr', 'radarr'], 'none = slot unused.'],
+    ['ARR2_URL', 'Address', 'text', 'How Stagehand reaches it from Unraid, for example http://127.0.0.1:8989 (Sonarr) or http://127.0.0.1:7878 (Radarr).'],
+    ['ARR2_KEY', 'API key', 'password', 'auto = read it from the container (config.xml). Or paste it from Settings &gt; General in Sonarr/Radarr.'],
+    ['ARR2_CONTAINER', 'Docker container name', 'text', 'As named on the Docker tab. Used to translate its folders to Unraid paths, and for the auto API key.'],
+  ],
+  'Sonarr / Radarr 3' => [
+    ['ARR3_TYPE', 'Type', ['none', 'sonarr', 'radarr'], 'none = slot unused.'],
+    ['ARR3_URL', 'Address', 'text', 'How Stagehand reaches it from Unraid, for example http://127.0.0.1:8989 (Sonarr) or http://127.0.0.1:7878 (Radarr).'],
+    ['ARR3_KEY', 'API key', 'password', 'auto = read it from the container (config.xml). Or paste it from Settings &gt; General in Sonarr/Radarr.'],
+    ['ARR3_CONTAINER', 'Docker container name', 'text', 'As named on the Docker tab. Used to translate its folders to Unraid paths, and for the auto API key.'],
+  ],
+  'Sonarr / Radarr 4' => [
+    ['ARR4_TYPE', 'Type', ['none', 'sonarr', 'radarr'], 'none = slot unused.'],
+    ['ARR4_URL', 'Address', 'text', 'How Stagehand reaches it from Unraid, for example http://127.0.0.1:8989 (Sonarr) or http://127.0.0.1:7878 (Radarr).'],
+    ['ARR4_KEY', 'API key', 'password', 'auto = read it from the container (config.xml). Or paste it from Settings &gt; General in Sonarr/Radarr.'],
+    ['ARR4_CONTAINER', 'Docker container name', 'text', 'As named on the Docker tab. Used to translate its folders to Unraid paths, and for the auto API key.'],
+  ],
+  'Sonarr / Radarr 5' => [
+    ['ARR5_TYPE', 'Type', ['none', 'sonarr', 'radarr'], 'none = slot unused.'],
+    ['ARR5_URL', 'Address', 'text', 'How Stagehand reaches it from Unraid, for example http://127.0.0.1:8989 (Sonarr) or http://127.0.0.1:7878 (Radarr).'],
+    ['ARR5_KEY', 'API key', 'password', 'auto = read it from the container (config.xml). Or paste it from Settings &gt; General in Sonarr/Radarr.'],
+    ['ARR5_CONTAINER', 'Docker container name', 'text', 'As named on the Docker tab. Used to translate its folders to Unraid paths, and for the auto API key.'],
+  ],
+  'Sonarr / Radarr 6' => [
+    ['ARR6_TYPE', 'Type', ['none', 'sonarr', 'radarr'], 'none = slot unused.'],
+    ['ARR6_URL', 'Address', 'text', 'How Stagehand reaches it from Unraid, for example http://127.0.0.1:8989 (Sonarr) or http://127.0.0.1:7878 (Radarr).'],
+    ['ARR6_KEY', 'API key', 'password', 'auto = read it from the container (config.xml). Or paste it from Settings &gt; General in Sonarr/Radarr.'],
+    ['ARR6_CONTAINER', 'Docker container name', 'text', 'As named on the Docker tab. Used to translate its folders to Unraid paths, and for the auto API key.'],
+  ],
   'Mover Tuning' => [
     ['MANAGE_MOVER_IGNORE', 'Protect SSD copies from the mover', 'yesno', 'Lists every SSD copy in the Mover Tuning ignore file so the mover leaves it alone until Stagehand releases it. Your own lines in that file are never changed. Needs the Mover Tuning option shown in Status to be on.'],
     ['MOVER_IGNORE_FILE', 'Ignore file', 'text', 'Must be the same path as "File list path" in Settings &gt; Scheduler &gt; Mover Tuning.'],
@@ -154,5 +194,16 @@ function badge($ok, $yes, $no) { return $ok ? "<span style='color:#3c3'>$yes</sp
 <?php if ($help):?><blockquote class="inline_help"><p><?=$help?></p></blockquote><?php endif;?>
 <?php endforeach;?>
 <?php endforeach;?>
+<script>
+// Show Sonarr/Radarr slots that are in use plus one empty slot; hide the rest.
+$(function(){
+  var shownEmpty = false;
+  for (var n = 1; n <= 6; n++) {
+    var sel = $('select[name="ARR' + n + '_TYPE"]');
+    var block = sel.closest('dl').nextUntil('div.title').addBack().add(sel.closest('dl').prevAll('div.title').first());
+    if (sel.val() === 'none') { if (shownEmpty) block.hide(); shownEmpty = true; }
+  }
+});
+</script>
 <dl><dt>&nbsp;</dt><dd><input type="submit" value="Apply"><input type="button" value="Done" onclick="done()"></dd></dl>
 </form>

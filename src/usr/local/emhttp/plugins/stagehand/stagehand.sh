@@ -25,7 +25,7 @@ done
 [ -z "$LC_ALL" ] && export LANG=C LC_ALL=C
 unset _l
 
-STAGEHAND_VERSION="2026.10.24a"
+STAGEHAND_VERSION="2026.10.24b"
 CMD="${1:-run}"; shift || true
 CFG=""
 while [ $# -gt 0 ]; do
@@ -60,6 +60,11 @@ source <(tr -d '\r' < "$CFG")
 : "${MOVER_IGNORE_FILE:=/mnt/user/system/mover/mover_ignore.txt}"
 : "${MOVER_TUNING_CFG:=/boot/config/plugins/ca.mover.tuning/ca.mover.tuning.cfg}"
 : "${SOURCE_ROOTS:=auto}" "${ALLOW_OTHER_POOL:=no}" "${ORPHAN_ACTION:=report}"
+: "${ORPHAN_GRACE_MIN:=30}"
+for _n in 1 2 3 4 5 6; do
+  eval ": \"\${ARR${_n}_TYPE:=none}\" \"\${ARR${_n}_URL:=}\" \"\${ARR${_n}_KEY:=auto}\" \"\${ARR${_n}_CONTAINER:=}\""
+done
+unset _n
 : "${SCHEDULE:=no}" "${RUN_CRON:=* * * * *}" "${CLEAN_CRON:=17 * * * *}"
 : "${NEXT_EPISODE_REGEX:=[Ss][0-9]+[Ee][0-9]+}" "${COPY_SIDECARS:=yes}" "${SIDECAR_TYPES:=srt ass ssa sub idx vtt sup}"
 
@@ -143,8 +148,9 @@ keep_hours_for() {
 }
 
 ########## media server ##########
-container_mounts() {  # prints "destination<TAB>source", longest destination first
-  docker inspect "$MEDIASERVER_CONTAINER" --format '{{range .Mounts}}{{.Destination}}{{"\t"}}{{.Source}}{{"\n"}}{{end}}' 2>/dev/null \
+container_mounts() { container_mounts_of "$MEDIASERVER_CONTAINER"; }
+container_mounts_of() {  # container -> "destination<TAB>source", longest destination first
+  docker inspect "$1" --format '{{range .Mounts}}{{.Destination}}{{"\t"}}{{.Source}}{{"\n"}}{{end}}' 2>/dev/null \
     | sed '/^$/d' | awk -F'\t' '{print length($1) "\t" $0}' | sort -rn | cut -f2-
 }
 
@@ -609,10 +615,126 @@ check_orphans() {
     log WARN "ORPHAN: pool copy disappeared but the array copy is still there and visible again: $arr (if Sonarr/Radarr/Maintainerr deleted, upgraded or renamed it, this array file is a leftover; if the mover moved it, it is the real copy)"
     notify warning "Stagehand: possible leftover file" "Array copy visible again after the pool copy disappeared: $arr"
     if [ $DRY -eq 0 ]; then
-      printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$arr" "$share" "$rel" "$size" "${amt:-}" "$NOW" "reported" >> "$ORPHANS"
+      printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$arr" "$share" "$rel" "$size" "${amt:--}" "$NOW" "reported" >> "$ORPHANS"
       item_drop "$pool"
     fi
   done < <(cat "$ITEMS")
+}
+
+########## Sonarr / Radarr ##########
+arr_ids() {
+  local n t
+  for n in 1 2 3 4 5 6; do t="ARR${n}_TYPE"; case "${!t}" in sonarr|radarr) echo "$n" ;; esac; done
+}
+arr_val() { local v="ARR${1}_$2"; echo "${!v}"; }
+arr_key() {  # API key, read from the container's config.xml when set to auto
+  local n="$1" key cfgdir
+  key=$(arr_val "$n" KEY)
+  [ "$key" != "auto" ] && [ -n "$key" ] && { echo "$key"; return 0; }
+  cfgdir=$(container_mounts_of "$(arr_val "$n" CONTAINER)" | awk -F'\t' '$1=="/config"{print $2; exit}')
+  [ -n "$cfgdir" ] && grep -oP '<ApiKey>\K[^<]+' "$cfgdir/config.xml" 2>/dev/null | head -1
+}
+arr_call() {  # n args... -> runs arr.php for instance n
+  local n="$1"; shift
+  ARR_TYPE=$(arr_val "$n" TYPE) ARR_URL=$(arr_val "$n" URL) ARR_KEY=$(arr_key "$n") \
+    ARR_MOUNTS=$(container_mounts_of "$(arr_val "$n" CONTAINER)") php "$SCRIPT_DIR/arr.php" "$@"
+}
+arr_name() { echo "$(arr_val "$1" TYPE) #$1 ($(arr_val "$1" CONTAINER))"; }
+
+# Ask every configured Sonarr/Radarr about an array file. Prints one verdict line:
+#   owned <who>       an instance still tracks this exact file: it is a real library file
+#   leftover <who>    an instance manages its folder but no longer tracks the file
+#   unmanaged         no instance manages this folder (nothing to go by)
+#   error <who>: ...  an instance could not be asked (never delete on an error)
+#   none              no Sonarr/Radarr configured
+arr_verdict() {
+  local f="$1" n out owner="" left="" any=0
+  for n in $(arr_ids); do
+    any=1
+    out=$(arr_call "$n" owns "$f" 2>&1) || { echo "error $(arr_name "$n"): ${out#error: }"; return; }
+    case "$out" in
+      owned) owner="$(arr_name "$n")" ;;
+      not-owned) left="$(arr_name "$n")" ;;
+    esac
+  done
+  [ $any -eq 0 ] && { echo "none"; return; }
+  [ -n "$owner" ] && { echo "owned by $owner"; return; }
+  [ -n "$left" ] && { echo "leftover $left no longer tracks it"; return; }
+  echo "unmanaged"
+}
+
+# Safety checks before deleting a leftover array file. Prints the blocking reason, or nothing.
+orphan_block_reason() {  # arr size amt det opens
+  local arr="$1" size="$2" amt="$3" det="$4" opens="$5"
+  [ "$MANAGE_MOVER_IGNORE" = "yes" ] && ! mover_tuning_reads_list && { echo "Mover Tuning ignore list is off, so a mover move cannot be ruled out"; return; }
+  [ "$amt" = "-" ] || [ -z "$amt" ] && { echo "no record of the file from when it was cached"; return; }
+  [ "$(stat -c %s "$arr")" = "$size" ] && [ "$(stat -c %Y "$arr")" = "$amt" ] || { echo "array file changed since it was cached"; return; }
+  grep -qxF -- "$arr" <<< "$opens" && { echo "file is open right now"; return; }
+  [ $((NOW - det)) -ge $((ORPHAN_GRACE_MIN * 60)) ] || { echo "waiting ${ORPHAN_GRACE_MIN} min after detection"; return; }
+}
+
+# True when a video named like this subtitle file still exists (share view or any array disk).
+sidecar_has_video() {  # share rel
+  local share="$1" rel="$2" dir sub root v vb ve
+  dir=$(dirname "$rel"); sub=$(basename "$rel")
+  while IFS= read -r root; do
+    for v in "$root/$share/$dir"/*; do
+      [ -f "$v" ] || continue
+      vb=$(basename "$v"); ve="${vb##*.}"
+      in_list "${ve,,}" $FILETYPES || continue
+      [[ "$sub" == "${vb%.*}."* ]] && return 0
+    done
+  done < <(echo /mnt/user; source_roots)
+  return 1
+}
+
+# Re-check every reported leftover: classify it with Sonarr/Radarr and, when ORPHAN_ACTION=delete
+# and every safety check passes, delete the leftover array file. Runs from clean.
+process_orphans() {
+  [ -s "$ORPHANS" ] || return 0
+  local arr share rel size amt det st new tmp="$ORPHANS.tmp.$$" opens verdict why ext
+  opens=$(open_targets)
+  : > "$tmp"
+  while IFS=$'\t' read -r arr share rel size amt det st; do
+    [ -z "$arr" ] && continue
+    new="$st"
+    case "$st" in owned|deleted|gone|cleared) printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$arr" "$share" "$rel" "$size" "$amt" "$det" "$st" >> "$tmp"; continue ;; esac
+    if [ ! -f "$arr" ]; then new="gone"
+    elif [ -f "$(pool_path "$share" "$rel")" ]; then new="cleared"
+    else
+      ext="${rel##*.}"; ext="${ext,,}"
+      if in_list "$ext" $FILETYPES; then
+        # Sonarr/Radarr see the share path (/mnt/user/...), not the array disk path.
+        verdict=$(arr_verdict "/mnt/user/$share/$rel")
+      else
+        # Subtitle sidecar: a leftover once no video with the same name exists any more.
+        if sidecar_has_video "$share" "$rel"; then verdict="owned (its video still exists)"
+        else verdict="leftover its video is gone"; fi
+      fi
+      case "$verdict" in
+        "owned (its video still exists)") new="reported" ;;   # re-check next run: the video may turn out to be a leftover
+        owned*) new="owned"; log INFO "not a leftover, keeping: $arr ($verdict; most likely moved to the array by the mover)" ;;
+        unmanaged|none) new="unmanaged"; [ "$st" != "unmanaged" ] && log INFO "leftover check: no Sonarr/Radarr manages $arr; only reporting it" ;;
+        error*) new="error"; log WARN "leftover check failed, will retry: ${verdict#error }" ;;
+        leftover*)
+          new="leftover"
+          if [ "$ORPHAN_ACTION" = "delete" ]; then
+            why=$(orphan_block_reason "$arr" "$size" "$amt" "$det" "$opens")
+            if [ -n "$why" ]; then log INFO "leftover not deleted yet ($why): $arr"
+            elif [ $DRY -eq 1 ]; then log DELETE "would delete leftover array file (${verdict#leftover }): $arr"
+            elif rm -f -- "$arr"; then new="deleted"; log DELETE "deleted leftover array file (${verdict#leftover }): $arr"
+              notify normal "Stagehand: leftover deleted" "$arr"
+            fi
+          elif [ "$st" != "leftover" ]; then
+            log WARN "LEFTOVER confirmed (${verdict#leftover }): $arr - safe to delete; ORPHAN_ACTION=report so it was left in place"
+          fi ;;
+      esac
+    fi
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$arr" "$share" "$rel" "$size" "${amt:--}" "$det" "$new" >> "$tmp"
+  done < "$ORPHANS"
+  # keep finished entries for 30 days, then forget them
+  awk -F'\t' -v n="$NOW" '!($7 ~ /^(owned|deleted|gone|cleared)$/ && n-$6 > 2592000)' "$tmp" > "$ORPHANS"
+  rm -f "$tmp"
 }
 
 cmd_run() {
@@ -668,6 +790,7 @@ cmd_clean() {
       item_drop "$pool"
     fi
   done < <(cat "$ITEMS")
+  process_orphans
   log INFO "clean done: released=$rel_n still-in-keep-window=$kept"
   update_mover_ignore
 }
@@ -694,6 +817,18 @@ cmd_check() {
     else echo "FAIL server $n: $out"; ok=0; fi
   done
   use_server 1
+  local a info
+  for a in $(arr_ids); do
+    if info=$(arr_call "$a" info 2>&1); then echo "ok   $(arr_name "$a") at $(arr_val "$a" URL): ${info#ok }"
+    else echo "FAIL $(arr_name "$a") at $(arr_val "$a" URL): ${info#error: }"; [ "$ORPHAN_ACTION" = "delete" ] && ok=0; fi
+  done
+  [ -z "$(arr_ids)" ] && echo "--   no Sonarr/Radarr configured: leftover files can only be reported, not confirmed"
+  if [ "$ORPHAN_ACTION" = "delete" ]; then
+    echo "--   leftover array files: AUTO-DELETE is on (after ${ORPHAN_GRACE_MIN} min, only when Sonarr/Radarr confirm)"
+    mover_tuning_reads_list || echo "WARN auto-delete is blocked while Mover Tuning's ignore list is off"
+  else
+    echo "--   leftover array files: report only"
+  fi
   if [ "$MANAGE_MOVER_IGNORE" = "yes" ]; then
     mover_tuning_reads_list; case $? in
       0) echo "ok   Mover Tuning reads its ignore list" ;;
@@ -743,14 +878,19 @@ cmd_status() {
     printf '%-8s %-8s %8s  %s/%s [%s]%s\n' $(( (NOW - copied) / 3600 )) $(( (NOW - last) / 3600 )) $(( size / 1048576 )) \
       "$share" "$rel" "$reason" "$( [ -f "$pool" ] || echo ' (missing)')"
   done < "$ITEMS"
-  local arr amt det st n=0
+  local arr amt det st n=0 label
   while IFS=$'\t' read -r arr share rel size amt det st; do
     [ -z "$arr" ] && continue
-    [ "$st" = "reported" ] || continue
-    if [ -f "$arr" ] && [ ! -f "$(pool_path "$share" "$rel")" ]; then
-      [ $n -eq 0 ] && echo && echo "Possible leftover array files (pool copy disappeared; check in Sonarr/Radarr before deleting):"
-      n=$((n + 1)); echo "  $(date -d "@$det" '+%F %R')  $arr"
-    fi
+    case "$st" in owned|deleted|gone|cleared) continue ;; esac
+    [ -f "$arr" ] || continue
+    case "$st" in
+      leftover)  label="LEFTOVER (Sonarr/Radarr no longer own it)" ;;
+      unmanaged) label="unknown (no Sonarr/Radarr manages it)" ;;
+      error)     label="unknown (Sonarr/Radarr check failed)" ;;
+      *)         label="waiting for the next check" ;;
+    esac
+    [ $n -eq 0 ] && echo && echo "Leftover array files (the pool copy disappeared). Checked against Sonarr/Radarr on every clean run:"
+    n=$((n + 1)); echo "  $(date -d "@$det" '+%F %R')  $label  $arr"
   done < "$ORPHANS"
 }
 

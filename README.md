@@ -117,9 +117,18 @@ With `MANAGE_MOVER_IGNORE="yes"`, Stagehand keeps a marked block of its cached f
 
 ## Leftover (orphan) files
 
-When a file exists on both the pool and the array, Unraid serves the pool copy, and a delete, rename or overwrite through `/mnt/user` changes **only the pool copy** (tested on Unraid 7.3.4). So if Sonarr, Radarr or Maintainerr deletes, upgrades or renames a title while Stagehand has it cached, the old array copy becomes visible again.
+When a file exists on both the pool and the array, Unraid serves the pool copy, and a delete, rename or overwrite through `/mnt/user` changes **only the pool copy** (tested on Unraid 7.3.4). So if Sonarr, Radarr or Maintainerr deletes, upgrades or renames a title while Stagehand has it cached, the old array copy becomes visible again, and Plex shows it.
 
-Every run checks for tracked pool copies that disappeared without Stagehand deleting them. Each one is logged as `ORPHAN`, sent as an Unraid notification and listed by `stagehand.sh status`. Stagehand does not delete these array files: a mover run can produce the same picture (pool copy gone, array copy present) when the array copy is the real one. Check in Sonarr or Radarr before deleting.
+Every run notices tracked pool copies that disappeared without Stagehand deleting them. Every clean run then asks each configured Sonarr/Radarr (up to six, `ARR1_*` to `ARR6_*`) about the array file:
+
+| Answer | Meaning | What Stagehand does |
+|---|---|---|
+| An instance still tracks this exact file | It is the real copy; the mover moved it | Keeps it, stops listing it |
+| An instance manages the folder but no longer tracks the file | Leftover | `report`: lists it and logs it. `delete`: deletes it after the checks below |
+| No instance manages the folder | Unknown | Lists it. Never deleted |
+| An instance did not answer | Unknown | Retries next clean run. Never deleted |
+
+`ORPHAN_ACTION="delete"` deletes array files, so it only acts when **all** of these hold: Sonarr/Radarr confirm the leftover, Mover Tuning's ignore list is on, the array file's size and modified time match what Stagehand recorded when it cached it, nothing has it open, and `ORPHAN_GRACE_MIN` has passed. Matching subtitle files are deleted once their video is gone. Run with `report` first and check what the Lists tab shows.
 
 A same-name replacement (for example a repack) writes the new file to the pool and leaves the old array copy. `clean` sees the size difference, keeps the pool file and stops tracking it.
 

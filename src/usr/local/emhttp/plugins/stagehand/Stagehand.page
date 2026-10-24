@@ -72,16 +72,16 @@ $sections = [
   ],
   'Media server 2 (optional)' => [
     ['MEDIASERVER2_TYPE', 'Type', ['none', 'plex', 'jellyfin', 'emby'], 'A second server, for example Jellyfin next to Plex. none = off.'],
-    ['MEDIASERVER2_URL', 'Address', 'text', ''],
+    ['MEDIASERVER2_URL', 'Address', 'text', 'How Stagehand reaches this server from Unraid, for example http://127.0.0.1:8096 for Jellyfin or Emby.'],
     ['MEDIASERVER2_TOKEN', 'Token / API key', 'password', 'Plex: auto. Jellyfin/Emby: API key.'],
-    ['MEDIASERVER2_CONTAINER', 'Docker container name', 'text', ''],
+    ['MEDIASERVER2_CONTAINER', 'Docker container name', 'text', 'The server container as named on the Docker tab. Used to read its folder mappings (and the token for Plex).'],
     ['PATH_MAP2', 'Path map', 'text', 'auto, or server_path=&gt;host_path; ...'],
   ],
   'Media server 3 (optional)' => [
-    ['MEDIASERVER3_TYPE', 'Type', ['none', 'plex', 'jellyfin', 'emby'], 'none = off.'],
-    ['MEDIASERVER3_URL', 'Address', 'text', ''],
+    ['MEDIASERVER3_TYPE', 'Type', ['none', 'plex', 'jellyfin', 'emby'], 'A third server. none = off.'],
+    ['MEDIASERVER3_URL', 'Address', 'text', 'How Stagehand reaches this server from Unraid, for example http://127.0.0.1:8096 for Jellyfin or Emby.'],
     ['MEDIASERVER3_TOKEN', 'Token / API key', 'password', 'Plex: auto. Jellyfin/Emby: API key.'],
-    ['MEDIASERVER3_CONTAINER', 'Docker container name', 'text', ''],
+    ['MEDIASERVER3_CONTAINER', 'Docker container name', 'text', 'The server container as named on the Docker tab. Used to read its folder mappings (and the token for Plex).'],
     ['PATH_MAP3', 'Path map', 'text', 'auto, or server_path=&gt;host_path; ...'],
   ],
   'Mover Tuning' => [
@@ -93,7 +93,7 @@ $sections = [
     ['STATE_DIR', 'State folder', 'text', 'Where Stagehand keeps its records. Keep this off the USB flash drive.'],
     ['LOG_FILE', 'Log file', 'text', 'Shown on the Log tab.'],
     ['LOG_MAX_MB', 'Log size limit (MB)', 'text', 'The log is rotated when it reaches this size.'],
-    ['SYSLOG', 'Also write to the Unraid system log', 'yesno', ''],
+    ['SYSLOG', 'Also write to the Unraid system log', 'yesno', 'Copy every Stagehand log line into the Unraid system log (Tools &gt; System Log, diagnostics and any syslog server), tagged stagehand. Handy for lining up Stagehand events with other server events. No = Log tab only.'],
     ['NOTIFY', 'Unraid notifications', ['none', 'errors', 'all'], 'errors = problems and leftover files. all = also every live switch.'],
   ],
   'Advanced' => [
@@ -101,7 +101,6 @@ $sections = [
     ['ALLOW_OTHER_POOL', 'Allow a pool the share does not use', 'yesno', 'Experimental. Unraid may keep reading the original instead of the copy after playback restarts.'],
     ['NEXT_EPISODE_REGEX', 'Episode name pattern', 'text', 'How an episode is recognised in a file name. The default matches S01E02. Season folders in several languages are recognised too.'],
     ['KILL_FILE', 'Pause file', 'text', 'While this file exists every run stops. Pause now / Resume create and remove it.'],
-    ['ORPHAN_ACTION', 'Leftover array files', ['report'], 'Report only: Stagehand lists them on the Lists tab and never deletes array files.'],
   ],
 ];
 $defaults = sh_read_cfg("$plugin/default.cfg");

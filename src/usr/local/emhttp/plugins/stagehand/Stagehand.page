@@ -167,6 +167,11 @@ function badge($ok, $yes, $no) { return $ok ? "<span style='color:#3c3'>$yes</sp
 <input type="hidden" name="#arg[1]" value="pause"><input type="submit" value="Pause now" title="Stops all runs within a minute. Playback is not affected.">
 <?php endif;?>
 </form>
+<form method="POST" action="/update.php" target="progressFrame" style="display:inline" onsubmit="return confirm('Release ALL pool copies now, ignoring keep time?\n\nOnly copies with a verified identical array twin are deleted from the pool. Copies that are playing are skipped. Array files are never touched.\n\nTo stop new copies while you empty the pool, press Pause now first.');">
+<input type="hidden" name="#command" value="<?=$plugin?>/stagehand.sh">
+<input type="hidden" name="#arg[1]" value="release-all">
+<input type="submit" value="Release all now" title="Empties Stagehand's copies from the pool now. Works while paused. Array files are never touched.">
+</form>
 <?php if (!$mtlist):?>
 <form method="POST" action="/update.php" target="progressFrame" style="display:inline" onsubmit="return confirm('Back up Mover Tuning\'s config, then turn on its ignore list using the file shown under Mover Tuning below?');">
 <input type="hidden" name="#command" value="<?=$plugin?>/stagehand.sh">

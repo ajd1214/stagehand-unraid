@@ -14,6 +14,8 @@
 #   enable-mover-ignore   back up Mover Tuning's config and turn on its ignore list
 #   uninstall-cleanup     remove Stagehand's block from the Mover Tuning ignore file
 #   pause / resume        create or remove the kill file
+#   release-all           release every pool copy now, ignoring keep time (same safety checks as clean;
+#                         works while paused, so: pause, then release-all, to empty the pool)
 #
 # Design credit: alturismo's Cache Mover (https://github.com/alturismo/unraid-cache-mover).
 
@@ -25,7 +27,7 @@ done
 [ -z "$LC_ALL" ] && export LANG=C LC_ALL=C
 unset _l
 
-STAGEHAND_VERSION="2026.10.24b"
+STAGEHAND_VERSION="2026.10.24c"
 CMD="${1:-run}"; shift || true
 CFG=""
 while [ $# -gt 0 ]; do
@@ -760,29 +762,31 @@ remove_empty_dirs() {  # share reldir : rmdir upward while empty, stop at the sh
   done
 }
 
-cmd_clean() {
-  local opens pool share rel size copied last reason hrs arr kept=0 rel_n=0
+cmd_clean() {  # [all] : "all" ignores keep time (release-all)
+  local all="${1:-}" opens pool share rel size copied last reason hrs arr kept=0 rel_n=0 busy=0 mover=0
+  local why="expired"
+  [ "$all" = "all" ] && { why="release-all"; log INFO "release-all: releasing every pool copy now, ignoring keep time"; }
   check_orphans
   opens=$(open_targets)
   while IFS=$'\t' read -r pool share rel size copied last reason _; do
     [ -z "$pool" ] && continue
     [ -f "$pool" ] || continue   # handled by check_orphans
     hrs=$(keep_hours_for "$rel")
-    if [ $((NOW - last)) -lt $((hrs * 3600)) ]; then kept=$((kept + 1)); continue; fi
+    if [ "$all" != "all" ] && [ $((NOW - last)) -lt $((hrs * 3600)) ]; then kept=$((kept + 1)); continue; fi
     arr=$(array_copy "$share" "$rel")
     if [ -z "$arr" ]; then
-      log WARN "expired but no array copy, keeping file and releasing it to the mover: $rel"
-      [ $DRY -eq 0 ] && item_drop "$pool"; continue
+      log WARN "$why but no array copy, keeping file and releasing it to the mover: $rel"
+      [ $DRY -eq 0 ] && item_drop "$pool"; mover=$((mover + 1)); continue
     fi
     if [ "$(stat -c %s "$pool")" != "$(stat -c %s "$arr")" ]; then
-      log WARN "expired but pool and array sizes differ, keeping file and releasing it to the mover: $rel"
-      [ $DRY -eq 0 ] && item_drop "$pool"; continue
+      log WARN "$why but pool and array sizes differ, keeping file and releasing it to the mover: $rel"
+      [ $DRY -eq 0 ] && item_drop "$pool"; mover=$((mover + 1)); continue
     fi
     if [ "$RELEASE_VERIFY" = "cmp" ] && ! cmp -s "$pool" "$arr"; then
-      log WARN "expired but content differs from array copy, keeping file and releasing it to the mover: $rel"
-      [ $DRY -eq 0 ] && item_drop "$pool"; continue
+      log WARN "$why but content differs from array copy, keeping file and releasing it to the mover: $rel"
+      [ $DRY -eq 0 ] && item_drop "$pool"; mover=$((mover + 1)); continue
     fi
-    if grep -qxF -- "$pool" <<< "$opens"; then log INFO "expired but open right now, retry later: $rel"; continue; fi
+    if grep -qxF -- "$pool" <<< "$opens"; then log INFO "$why but open right now, retry later: $rel"; busy=$((busy + 1)); continue; fi
     if [ $DRY -eq 1 ]; then log RELEASE "would delete pool copy (array twin verified on ${arr%%/"$share"/*}): $rel"
     else
       rm -f -- "$pool" && { log RELEASE "deleted pool copy (array twin verified on ${arr%%/"$share"/*}): $rel"; rel_n=$((rel_n + 1)); }
@@ -791,7 +795,12 @@ cmd_clean() {
     fi
   done < <(cat "$ITEMS")
   process_orphans
-  log INFO "clean done: released=$rel_n still-in-keep-window=$kept"
+  if [ "$all" = "all" ]; then
+    log INFO "release-all done: released=$rel_n in-use=$busy left-for-mover=$mover"
+    echo "release-all done: released=$rel_n in-use (retry later)=$busy left on the pool for the mover=$mover"
+  else
+    log INFO "clean done: released=$rel_n still-in-keep-window=$kept"
+  fi
   update_mover_ignore
 }
 
@@ -945,19 +954,27 @@ case "$CMD" in
   pause) mkdir -p "$(dirname "$KILL_FILE")" && touch "$KILL_FILE" && echo "paused: all runs stop until resumed"; exit 0 ;;
   resume) rm -f "$KILL_FILE" && echo "resumed"; exit 0 ;;
   explain) cmd_explain; exit 0 ;;
-  run|clean|status) ;;
-  *) echo "usage: $0 [run|clean|check|explain|status|apply|enable-mover-ignore|uninstall-cleanup] [-c cfg]" >&2; exit 2 ;;
+  run|clean|status|release-all) ;;
+  *) echo "usage: $0 [run|clean|release-all|check|explain|status|apply|pause|resume|enable-mover-ignore|uninstall-cleanup] [-c cfg]" >&2; exit 2 ;;
 esac
 
 state_init || { echo "cannot create state dir $STATE_DIR" >&2; exit 1; }
 [ "$CMD" = "status" ] && { cmd_status; exit 0; }
-[ "$ENABLED" = "yes" ] || exit 0
-[ -f "$KILL_FILE" ] && exit 0
+# release-all is a manual action: it works while disabled or paused, and waits for a running cycle.
+if [ "$CMD" != "release-all" ]; then
+  [ "$ENABLED" = "yes" ] || exit 0
+  [ -f "$KILL_FILE" ] && exit 0
+fi
 
 exec 9>"$LOCK"
-flock -n 9 || exit 0
+if [ "$CMD" = "release-all" ]; then
+  flock -w 300 9 || { echo "another Stagehand run is still busy after 5 minutes; try again" >&2; exit 1; }
+else
+  flock -n 9 || exit 0
+fi
 rotate_log
 case "$CMD" in
   run) cmd_run ;;
   clean) cmd_clean ;;
+  release-all) cmd_clean all ;;
 esac

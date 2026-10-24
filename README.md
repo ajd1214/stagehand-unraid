@@ -82,6 +82,7 @@ The plugin installs the script at `/usr/local/emhttp/plugins/stagehand/stagehand
 | `explain` | Show how each active playback session would be handled and why. Changes nothing. |
 | `run` | One cycle: detect, copy, switch, copy next episodes. |
 | `clean` | Release expired pool copies with a verified array twin. |
+| `release-all` | Release every pool copy now, ignoring keep time. Same checks as `clean`; copies in use are skipped. Works while paused, so **Pause now** then **Release all now** empties the pool. |
 | `status` | List tracked copies and leftover array files. |
 | `apply` | Write or remove the schedule from the saved settings. |
 | `pause` / `resume` | Create or remove the kill file. |

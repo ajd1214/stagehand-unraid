@@ -2,13 +2,13 @@
 <!DOCTYPE PLUGIN [
 <!ENTITY name      "stagehand">
 <!ENTITY author    "ajd1214">
-<!ENTITY version   "2026.10.24b">
+<!ENTITY version   "2026.10.24c">
 <!ENTITY launch    "Utilities/Stagehand">
 <!ENTITY gitURL    "https://raw.githubusercontent.com/ajd1214/stagehand-unraid/main">
 <!ENTITY pluginURL "&gitURL;/stagehand.plg">
 <!ENTITY plgPATH   "/boot/config/plugins/&name;">
 <!ENTITY emhttp    "/usr/local/emhttp/plugins/&name;">
-<!ENTITY pkgSHA    "93d30c16a55c2588b6fdd86c036c63b4bed583fed6d37f6d434f4cd4ddb1c029">
+<!ENTITY pkgSHA    "9d256f38bd17d8d2c75402936ed4f3118ae1b979de7812a76288af3efbf11ee0">
 <!ENTITY gdbPKG    "gdb-15.2-x86_64-3">
 <!ENTITY gdbSHA    "88f0417bb73d1fc6c0f6a955f0ff6b3667a17698162ba0340079c1cf9628c4a1">
 ]>
@@ -21,6 +21,9 @@
         min="7.0.0">
 
 <CHANGES>
+###2026.10.24c
+- New: Release all now button (release-all command) empties Stagehand's pool copies, ignoring keep time. Same safety checks as clean. Works while paused.
+
 ###2026.10.24b
 - Leftover array files are now checked against up to six Sonarr/Radarr instances
 - Optional auto-delete of confirmed leftovers (off by default, with safety checks and a wait)

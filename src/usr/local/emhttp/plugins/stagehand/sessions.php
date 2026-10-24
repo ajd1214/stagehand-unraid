@@ -27,6 +27,7 @@ try {
         if ($root === false) throw new Exception("could not parse Plex sessions");
         foreach ($root->children() as $item) {
             $state = isset($item->Player) ? (string)$item->Player['state'] : '';
+            if ($state === '') $state = 'unknown';   // never print an empty field
             $files = [];
             foreach ($item->xpath('.//Part') as $part) {
                 if ((string)$part['file'] !== '') $files[] = (string)$part['file'];

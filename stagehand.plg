@@ -2,13 +2,13 @@
 <!DOCTYPE PLUGIN [
 <!ENTITY name      "stagehand">
 <!ENTITY author    "ajd1214">
-<!ENTITY version   "2026.10.24">
+<!ENTITY version   "2026.10.24a">
 <!ENTITY launch    "Utilities/Stagehand">
 <!ENTITY gitURL    "https://raw.githubusercontent.com/ajd1214/stagehand-unraid/main">
 <!ENTITY pluginURL "&gitURL;/stagehand.plg">
 <!ENTITY plgPATH   "/boot/config/plugins/&name;">
 <!ENTITY emhttp    "/usr/local/emhttp/plugins/&name;">
-<!ENTITY pkgSHA    "2a1ca90f827008e69bb53b02a178a659e10cb6979c4a977f58a05b18e1628e91">
+<!ENTITY pkgSHA    "d74e6b55256019b351d4526b26df8a99305921d9450ba4f83ec009464af053d6">
 <!ENTITY gdbPKG    "gdb-15.2-x86_64-3">
 <!ENTITY gdbSHA    "88f0417bb73d1fc6c0f6a955f0ff6b3667a17698162ba0340079c1cf9628c4a1">
 ]>
@@ -21,6 +21,13 @@
         min="7.0.0">
 
 <CHANGES>
+###2026.10.24a
+- "Also copy" can now be a number, rest (every later episode) or season (whole season folder)
+- Pool safety split: read-only always stops copying; new filesystem errors and disk I/O errors are separate switches with a pause length
+- Up to three media servers at once (any mix of Plex, Jellyfin, Emby)
+- Option to remove empty pool folders after release
+- Clearer help text; every field shows its default
+
 ###2026.10.24
 - First plugin release: settings, log and lists pages; schedule; pause/resume; Mover Tuning button
 - Copies the playing file to the pool, live-switches playback, copies next episode and subtitles

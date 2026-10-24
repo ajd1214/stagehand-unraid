@@ -13,14 +13,14 @@ When someone starts watching a title that lives on a spinning array disk, Stageh
 3. **Wait.** A title must be seen playing for `WAIT_SECONDS` before it is copied, so previews and browsing are ignored.
 4. **Copy.** Copies the playing file to `/mnt/<pool>/<share>/<path>` (rsync writes a hidden temp file and renames it only when complete), then verifies the size.
 5. **Switch.** Finds the Unraid user-share process (`shfs`) file handle that is reading the array copy and swaps it to the SSD copy with `gdb`, keeping the read position. Retried every run until it succeeds or playback ends.
-6. **Next episode.** Copies the next `NEXT_EPISODES` episodes of the season ahead of time.
+6. **More episodes.** `NEXT_EPISODES` copies the next N episodes, every later episode (`rest`) or the whole season folder (`season`), up to `MAX_COPY_GB_PER_RUN` per run, so the array disk can stay asleep for the rest of the season.
 7. **Release.** `clean` deletes a pool copy only when its keep time has passed, an array copy with the same name and size exists (or byte-identical with `RELEASE_VERIFY="cmp"`), and nothing has it open.
 
 ## Safety rules
 
 - Never writes to, moves or deletes anything on array disks.
 - Never deletes a pool copy without a verified array twin. If the pool copy changed (for example a re-encode), it is kept and left for the mover.
-- Skips copying when the pool is read-only, reports filesystem errors, logged recent I/O errors, or would fall below `MIN_FREE_GB`.
+- Never copies to a read-only pool. Optionally pauses copying after new filesystem errors or disk I/O errors (`SKIP_ON_FS_ERRORS`, `SKIP_ON_IO_ERRORS`, `IO_ERROR_WINDOW_MIN`). Never lets the pool drop below `MIN_FREE_GB`.
 - Only works on shares listed in `SHARES`, and by default only when the target pool is that share's own primary pool.
 - One run at a time (lock file). `run` and `clean` never overlap.
 - Kill switch: create the file in `KILL_FILE` and every run exits immediately.
@@ -48,7 +48,7 @@ Requirements and limits:
 - Episodes are recognized by an `S01E02`-style name or a season folder (Season, Specials, Staffel, Saison, Temporada, Stagione, Seizoen). Anything else gets no next-episode copy.
 - When Plex lists several versions of a title without saying which is playing, only the version actually being read is copied.
 - Media servers on another machine or a VM need a manual `PATH_MAP`, for example `PATH_MAP="Z:\TV Shows=>/mnt/user/data_tv"`.
-- One media server at a time. mergerfs setups are not supported yet.
+- Up to three media servers at once (any mix of Plex, Jellyfin and Emby). mergerfs setups are not supported yet.
 
 ## Install
 

@@ -25,7 +25,7 @@ done
 [ -z "$LC_ALL" ] && export LANG=C LC_ALL=C
 unset _l
 
-STAGEHAND_VERSION="2026.10.24"
+STAGEHAND_VERSION="2026.10.24a"
 CMD="${1:-run}"; shift || true
 CFG=""
 while [ $# -gt 0 ]; do
@@ -50,7 +50,10 @@ source <(tr -d '\r' < "$CFG")
 : "${SYSLOG:=yes}" "${NOTIFY:=errors}" "${POOL:=}" "${SHARES:=}" "${SUBFOLDERS:=}" "${EXCLUSIONS:=}"
 : "${FILETYPES:=mkv mp4}" "${WAIT_SECONDS:=60}" "${NEXT_EPISODES:=0}" "${SWITCH_MODE:=switch}"
 : "${GDB_TIMEOUT_SECONDS:=10}" "${KEEP_HOURS:=24}" "${KEEP_RULES:=}" "${RELEASE_VERIFY:=size}"
-: "${MIN_FREE_GB:=100}" "${HEALTH_CHECK:=yes}" "${HEALTH_IO_ERROR_WINDOW_MIN:=60}"
+: "${MIN_FREE_GB:=100}" "${SKIP_ON_FS_ERRORS:=yes}" "${SKIP_ON_IO_ERRORS:=yes}"
+: "${IO_ERROR_WINDOW_MIN:=${HEALTH_IO_ERROR_WINDOW_MIN:-60}}" "${CLEAN_EMPTY_DIRS:=yes}"
+# Older configs: HEALTH_CHECK="no" turned off all error checks.
+[ "${HEALTH_CHECK:-yes}" = "no" ] && SKIP_ON_FS_ERRORS=no && SKIP_ON_IO_ERRORS=no
 : "${MAX_COPY_GB_PER_RUN:=60}" "${COPY_BWLIMIT_KBPS:=0}"
 : "${MEDIASERVER_TYPE:=plex}" "${MEDIASERVER_URL:=http://127.0.0.1:32400}" "${MEDIASERVER_TOKEN:=auto}"
 : "${MEDIASERVER_CONTAINER:=plex}" "${PATH_MAP:=auto}" "${MANAGE_MOVER_IGNORE:=no}"
@@ -204,6 +207,48 @@ get_sessions() {
   SH_TYPE="$MEDIASERVER_TYPE" SH_URL="$MEDIASERVER_URL" SH_TOKEN="$tok" SH_VERBOSE="${SH_VERBOSE:-0}" php "$SCRIPT_DIR/sessions.php"
 }
 
+########## multiple media servers ##########
+# Server 1 uses MEDIASERVER_*/PATH_MAP. Servers 2 and 3 use MEDIASERVER2_*/PATH_MAP2 and
+# MEDIASERVER3_*/PATH_MAP3; a server is active when its TYPE is plex, jellyfin or emby.
+S1_TYPE="$MEDIASERVER_TYPE" S1_URL="$MEDIASERVER_URL" S1_TOKEN="$MEDIASERVER_TOKEN"
+S1_CONTAINER="$MEDIASERVER_CONTAINER" S1_MAP="$PATH_MAP"
+server_ids() {
+  local n t
+  for n in 1 2 3; do
+    if [ "$n" = 1 ]; then t="$S1_TYPE"; else t="MEDIASERVER${n}_TYPE"; t="${!t:-none}"; fi
+    case "$t" in plex|jellyfin|emby) echo "$n" ;; esac
+  done
+}
+use_server() {
+  local n="$1" v
+  if [ "$n" = 1 ]; then
+    MEDIASERVER_TYPE="$S1_TYPE" MEDIASERVER_URL="$S1_URL" MEDIASERVER_TOKEN="$S1_TOKEN"
+    MEDIASERVER_CONTAINER="$S1_CONTAINER" PATH_MAP="$S1_MAP"
+  else
+    v="MEDIASERVER${n}_TYPE"; MEDIASERVER_TYPE="${!v}"
+    v="MEDIASERVER${n}_URL"; MEDIASERVER_URL="${!v}"
+    v="MEDIASERVER${n}_TOKEN"; MEDIASERVER_TOKEN="${!v:-auto}"
+    v="MEDIASERVER${n}_CONTAINER"; MEDIASERVER_CONTAINER="${!v}"
+    v="PATH_MAP${n}"; PATH_MAP="${!v:-auto}"
+  fi
+}
+# Prints "state<TAB>flag<TAB>host_path<TAB>server_number<TAB>server_path" for every server.
+all_sessions() {
+  local n out st fl sp host rc=0
+  for n in $(server_ids); do
+    use_server "$n"
+    if ! out=$(get_sessions); then printf 'ERROR\t%s\n' "server $n ($MEDIASERVER_TYPE): $out"; rc=1; continue; fi
+    while IFS=$'\t' read -r st fl sp; do
+      [ -z "$sp" ] && continue
+      # Empty fields would collapse when read back with IFS=tab, so use "-" placeholders.
+      host=$(to_host_path "$sp") || host="-"
+      printf '%s\t%s\t%s\t%s\t%s\n' "$st" "$fl" "$host" "$n" "$sp"
+    done <<< "$out"
+  done
+  use_server 1
+  return $rc
+}
+
 ########## pool checks ##########
 pool_devices() {  # short device names (sda sdc ...) backing the pool
   local fs; fs=$(findmnt -no FSTYPE "/mnt/$POOL" 2>/dev/null)
@@ -213,23 +258,37 @@ pool_devices() {  # short device names (sda sdc ...) backing the pool
   esac
 }
 
-pool_healthy() {  # 0 = ok; prints reason when not ok
+pool_healthy() {  # 0 = ok; prints reason when not ok. Read-only always blocks copying.
   findmnt -no OPTIONS "/mnt/$POOL" 2>/dev/null | tr ',' '\n' | grep -qx ro && { echo "pool is read-only"; return 1; }
-  [ "$HEALTH_CHECK" = "yes" ] || return 0
   local fs; fs=$(findmnt -no FSTYPE "/mnt/$POOL" 2>/dev/null)
-  if [ "$fs" = "btrfs" ]; then
-    btrfs device stats -c "/mnt/$POOL" >/dev/null 2>&1 || { echo "btrfs device stats report errors"; return 1; }
-  elif [ "$fs" = "zfs" ]; then
-    zpool status -x "$POOL" 2>/dev/null | grep -q "is healthy" || { echo "zpool not healthy"; return 1; }
+  local win=$((IO_ERROR_WINDOW_MIN * 60))
+  if [ "$SKIP_ON_FS_ERRORS" = "yes" ]; then
+    # Counters are lifetime totals, so old SSDs with past errors would block forever.
+    # Only NEW errors (counter went up) block copying, for IO_ERROR_WINDOW_MIN minutes.
+    local cur prev pts sf="$STATE_DIR/fs_errors.state"
+    if [ "$fs" = "btrfs" ]; then
+      cur=$(btrfs device stats "/mnt/$POOL" 2>/dev/null | awk '{s+=$2} END{print s+0}')
+    elif [ "$fs" = "zfs" ]; then
+      cur=$(zpool status "$POOL" 2>/dev/null | awk '$1 ~ /^(sd|nvme|ata|wwn)/ {s+=$3+$4+$5} END{print s+0}')
+    fi
+    if [ -n "$cur" ]; then
+      read -r prev pts < "$sf" 2>/dev/null
+      if [ -z "$prev" ]; then echo "$cur 0" > "$sf" 2>/dev/null
+      elif [ "$cur" -gt "$prev" ]; then echo "$cur $NOW" > "$sf" 2>/dev/null; pts=$NOW
+      elif [ "$cur" -lt "$prev" ]; then echo "$cur ${pts:-0}" > "$sf" 2>/dev/null; fi
+      [ "${pts:-0}" -gt 0 ] && [ $((NOW - pts)) -lt "$win" ] && { echo "new filesystem errors on the pool in the last $IO_ERROR_WINDOW_MIN min"; return 1; }
+    fi
   fi
-  local devs last ts
-  devs=$(pool_devices | sort -u | paste -sd'|')
-  if [ -n "$devs" ] && [ -f /var/log/syslog ]; then
-    last=$(grep -aE "I/O error, dev ($devs)[, ]" /var/log/syslog | tail -1 | cut -c1-15)
-    if [ -n "$last" ]; then
-      ts=$(date -d "$last" +%s 2>/dev/null || echo 0)
-      [ "$ts" -gt "$NOW" ] && ts=$(date -d "$last last year" +%s 2>/dev/null || echo 0)
-      [ $((NOW - ts)) -lt $((HEALTH_IO_ERROR_WINDOW_MIN * 60)) ] && { echo "recent I/O errors on pool device(s) ($devs) at $last"; return 1; }
+  if [ "$SKIP_ON_IO_ERRORS" = "yes" ]; then
+    local devs last ts
+    devs=$(pool_devices | sort -u | paste -sd'|')
+    if [ -n "$devs" ] && [ -f /var/log/syslog ]; then
+      last=$(grep -aE "I/O error, dev ($devs)[, ]" /var/log/syslog | tail -1 | cut -c1-15)
+      if [ -n "$last" ]; then
+        ts=$(date -d "$last" +%s 2>/dev/null || echo 0)
+        [ "$ts" -gt "$NOW" ] && ts=$(date -d "$last last year" +%s 2>/dev/null || echo 0)
+        [ $((NOW - ts)) -lt "$win" ] && { echo "disk I/O errors on pool device(s) ($devs) at $last"; return 1; }
+      fi
     fi
   fi
   return 0
@@ -418,9 +477,8 @@ mover_tuning_reads_list() {
 }
 
 ########## run ##########
-handle_title() {  # state flag server_path
-  local st="$1" flag="$2" sp="$3" host share rel arr dst first size why
-  host=$(to_host_path "$sp") || { warn_once "map:${sp%/*}" "no path mapping for: $sp"; return; }
+handle_title() {  # state flag host_path
+  local st="$1" flag="$2" host="$3" share rel arr dst first size why
   IFS=$'\t' read -r share rel < <(split_share "$host") || return
   [ -n "$rel" ] || return
   in_list "$share" $SHARES || return
@@ -447,6 +505,8 @@ handle_title() {  # state flag server_path
     if [ "$(stat -c %s "$dst")" = "$(stat -c %s "$arr")" ]; then
       [ -n "$(item_get "$dst")" ] && [ $DRY -eq 0 ] && item_touch "$dst"
       switch_playback "$arr" "$dst" "$rel" 1
+      # Keep filling the season/next episodes on later runs (MAX_COPY_GB_PER_RUN per run).
+      pool_healthy >/dev/null && copy_next_episodes "$share" "$rel"
     fi
     return
   fi
@@ -498,25 +558,37 @@ is_episode() {  # rel : true when the file looks like a TV episode
 }
 
 copy_next_episodes() {  # share rel
-  local share="$1" rel="$2" dir base n=0 f arr dst size budget
-  [ "$NEXT_EPISODES" -gt 0 ] 2>/dev/null || return 0
-  dir=$(dirname "$rel"); base=$(basename "$rel")
+  # NEXT_EPISODES: a number = that many following episodes; "rest" = every later episode in the
+  # folder; "season" = the whole folder (earlier episodes too). Limited to MAX_COPY_GB_PER_RUN per
+  # run; the remainder is copied on the next runs while the title is still playing.
+  local share="$1" rel="$2" dir base n=0 limit f arr dst size budget listing
+  case "$NEXT_EPISODES" in
+    rest|season) limit=999999 ;;
+    *) [ "$NEXT_EPISODES" -gt 0 ] 2>/dev/null || return 0; limit=$NEXT_EPISODES ;;
+  esac
   is_episode "$rel" || return 0
+  dir=$(dirname "$rel"); base=$(basename "$rel")
   budget=$((MAX_COPY_GB_PER_RUN * 1024 * 1024 * 1024))
+  if [ "$NEXT_EPISODES" = "season" ]; then
+    listing=$(ls -1 "/mnt/user/$share/$dir" 2>/dev/null | LC_ALL=C sort | grep -vxF -- "$base")
+  else
+    listing=$(ls -1 "/mnt/user/$share/$dir" 2>/dev/null | LC_ALL=C sort | awk -v b="$base" 'f{print} $0==b{f=1}')
+  fi
   while IFS= read -r f; do
-    [ "$n" -ge "$NEXT_EPISODES" ] && break
+    [ -z "$f" ] && continue
+    [ "$n" -ge "$limit" ] && break
     passes_filters "$dir/$f" || continue
     n=$((n + 1))
     dst=$(pool_path "$share" "$dir/$f")
     [ -f "$dst" ] && continue
     arr=$(array_copy "$share" "$dir/$f") || continue
     size=$(stat -c %s "$arr")
-    [ "$size" -le "$budget" ] || { log INFO "next-episode copy skipped (MAX_COPY_GB_PER_RUN): $dir/$f"; break; }
-    pool_has_room "$size" || { log WARN "not enough free space for next episode: $dir/$f"; break; }
+    [ "$size" -le "$budget" ] || break
+    pool_has_room "$size" || { warn_once "room:$share/$dir" "not enough free space to copy more of: $dir"; break; }
     budget=$((budget - size))
-    if [ $DRY -eq 1 ]; then log COPY "would copy next episode $(( size / 1048576 )) MB: $dir/$f"
+    if [ $DRY -eq 1 ]; then log COPY "would copy episode $(( size / 1048576 )) MB: $dir/$f"
     else copy_to_pool "$arr" "$dst" "$share" "$dir/$f" && item_upsert "$dst" "$share" "$dir/$f" "$size" "$NOW" "$NOW" "next" "$(stat -c %Y "$arr")" && copy_sidecars "$share" "$dir/$f"; fi
-  done < <(ls -1 "/mnt/user/$share/$dir" 2>/dev/null | LC_ALL=C sort | awk -v b="$base" 'f{print} $0==b{f=1}')
+  done <<< "$listing"
 }
 
 ########## orphans ##########
@@ -544,13 +616,14 @@ check_orphans() {
 }
 
 cmd_run() {
-  local out st sp
+  local out st fl host n sp
   check_orphans
-  if ! out=$(get_sessions); then log ERROR "$out"; return 1; fi
-  [ -z "$out" ] && { seen_prune; return 0; }
-  local fl
-  while IFS=$'\t' read -r st fl sp; do
-    [ -n "$sp" ] && handle_title "$st" "$fl" "$sp"
+  out=$(all_sessions)
+  while IFS=$'\t' read -r st fl host n sp; do
+    [ -z "$st" ] && continue
+    if [ "$st" = "ERROR" ]; then log ERROR "$fl"; continue; fi
+    if [ "$host" = "-" ]; then warn_once "map:$n:${sp%/*}" "server $n: no path mapping for: $sp"; continue; fi
+    handle_title "$st" "$fl" "$host"
   done <<< "$out"
   seen_prune
   update_mover_ignore
@@ -591,7 +664,7 @@ cmd_clean() {
     if [ $DRY -eq 1 ]; then log RELEASE "would delete pool copy (array twin verified on ${arr%%/"$share"/*}): $rel"
     else
       rm -f -- "$pool" && { log RELEASE "deleted pool copy (array twin verified on ${arr%%/"$share"/*}): $rel"; rel_n=$((rel_n + 1)); }
-      remove_empty_dirs "$share" "$(dirname "$rel")"
+      [ "$CLEAN_EMPTY_DIRS" = "yes" ] && remove_empty_dirs "$share" "$(dirname "$rel")"
       item_drop "$pool"
     fi
   done < <(cat "$ITEMS")
@@ -612,10 +685,15 @@ cmd_check() {
   out=$(pool_healthy) && echo "ok   pool health" || echo "WARN pool health: $out"
   echo "--   pool free: $(df -h --output=avail "/mnt/$POOL" | tail -1 | tr -d ' ') (minimum ${MIN_FREE_GB}G)"
   echo "--   source roots: $(source_roots | paste -sd' ')"
-  echo "--   path map:"; path_map_lines | sed 's/^/       /'
-  if out=$(get_sessions); then echo "ok   media server reachable; active sessions: $(grep -c . <<< "$out")"
-    local fl; while IFS=$'\t' read -r x fl sp; do [ -n "$sp" ] && echo "       $x  $sp  ->  $(to_host_path "$sp" || echo 'NO MAPPING')"; done <<< "$out"
-  else echo "FAIL media server: $out"; ok=0; fi
+  local n fl sp
+  for n in $(server_ids); do
+    use_server "$n"
+    echo "--   server $n: $MEDIASERVER_TYPE at $MEDIASERVER_URL, path map:"; path_map_lines | sed 's/^/       /'
+    if out=$(get_sessions); then echo "ok   server $n reachable; active sessions: $(grep -c . <<< "$out")"
+      while IFS=$'\t' read -r x fl sp; do [ -n "$sp" ] && echo "       $x  $sp  ->  $(to_host_path "$sp" || echo 'NO MAPPING')"; done <<< "$out"
+    else echo "FAIL server $n: $out"; ok=0; fi
+  done
+  use_server 1
   if [ "$MANAGE_MOVER_IGNORE" = "yes" ]; then
     mover_tuning_reads_list; case $? in
       0) echo "ok   Mover Tuning reads its ignore list" ;;
@@ -628,13 +706,14 @@ cmd_check() {
 }
 
 cmd_explain() {  # read-only: show how each active session would be handled and why
-  local out st sp host share rel arr dst fl why
-  if ! out=$(SH_VERBOSE=1 get_sessions); then echo "media server: $out"; return 1; fi
+  local out st sp host share rel arr dst fl why n
+  out=$(SH_VERBOSE=1 all_sessions)
   [ -z "$out" ] && { echo "no active sessions with a file path"; return 0; }
-  while IFS=$'\t' read -r st fl sp; do
-    [ -z "$sp" ] && continue
-    echo "== [$st${fl:+, $fl}] $sp"
-    host=$(to_host_path "$sp") || { echo "   -> no path mapping: SKIP"; continue; }
+  while IFS=$'\t' read -r st fl host n sp; do
+    [ -z "$st" ] && continue
+    [ "$st" = "ERROR" ] && { echo "$fl"; continue; }
+    echo "== server $n [$st${fl:+, $fl}] $sp"
+    [ "$host" != "-" ] || { echo "   -> no path mapping: SKIP"; continue; }
     echo "   host path: $host"
     IFS=$'\t' read -r share rel < <(split_share "$host")
     echo "   share: $share   rel: $rel"
@@ -652,7 +731,7 @@ cmd_explain() {  # read-only: show how each active session would be handled and 
     if [ -z "$arr" ]; then echo "   -> not on the array (already on pool or elsewhere): nothing to do"
     elif [ -f "$dst" ]; then echo "   -> already cached: run would retry the switch if the array fd is still open"
     elif [ "$fl" = "guess" ] && [ -z "$(shfs_fds_for "$arr")" ]; then echo "   -> one of several versions and not the one being read: SKIP"
-    else echo "   -> run would copy after ${WAIT_SECONDS}s of playback, then switch$(is_episode "$rel" && [ "$NEXT_EPISODES" -gt 0 ] && echo ", then the next $NEXT_EPISODES episode(s)")"; fi
+    else echo "   -> run would copy after ${WAIT_SECONDS}s of playback, then switch$(is_episode "$rel" && [ "$NEXT_EPISODES" != "0" ] && echo ", then episodes: $NEXT_EPISODES")"; fi
   done <<< "$out"
 }
 

@@ -52,6 +52,7 @@ source <(tr -d '\r' < "$CFG")
 : "${MOVER_IGNORE_FILE:=/mnt/user/system/mover/mover_ignore.txt}"
 : "${MOVER_TUNING_CFG:=/boot/config/plugins/ca.mover.tuning/ca.mover.tuning.cfg}"
 : "${SOURCE_ROOTS:=auto}" "${ALLOW_OTHER_POOL:=no}" "${ORPHAN_ACTION:=report}"
+: "${NEXT_EPISODE_REGEX:=[Ss][0-9]+[Ee][0-9]+}" "${COPY_SIDECARS:=yes}" "${SIDECAR_TYPES:=srt ass ssa sub idx vtt sup}"
 
 ITEMS="$STATE_DIR/items.tsv"     # pool_path  share  rel  size  copied_epoch  last_played_epoch  reason  array_mtime
 ORPHANS="$STATE_DIR/orphans.tsv" # array_path  share  rel  size  array_mtime  detected_epoch  status
@@ -142,14 +143,27 @@ path_map_lines() {
   if [ "$PATH_MAP" = "auto" ]; then
     container_mounts
   else
-    local p; for p in $PATH_MAP; do printf '%s\t%s\n' "${p%%:*}" "${p#*:}"; done \
-      | awk -F'\t' '{print length($1) "\t" $0}' | sort -rn | cut -f2-
+    local p a b
+    if [[ "$PATH_MAP" == *"=>"* ]]; then
+      # New format: "server_path=>host_path; server_path=>host_path" (spaces and drive letters allowed)
+      local IFS=';'
+      for p in $PATH_MAP; do
+        a="${p%%=>*}"; b="${p#*=>}"
+        a="${a#"${a%%[![:space:]]*}"}"; a="${a%"${a##*[![:space:]]}"}"
+        b="${b#"${b%%[![:space:]]*}"}"; b="${b%"${b##*[![:space:]]}"}"
+        [ -n "$a" ] && [ -n "$b" ] && printf '%s\t%s\n' "${a//\\//}" "$b"
+      done | awk -F'\t' '{print length($1) "\t" $0}' | sort -rn | cut -f2-
+    else
+      # Old format: "container_path:host_path" pairs separated by spaces
+      for p in $PATH_MAP; do printf '%s\t%s\n' "${p%%:*}" "${p#*:}"; done \
+        | awk -F'\t' '{print length($1) "\t" $0}' | sort -rn | cut -f2-
+    fi
   fi
 }
 
 # Media-server path -> host path, using the longest matching container mount.
 to_host_path() {
-  local p="$1" dst src
+  local p="${1//\\//}" dst src
   while IFS=$'\t' read -r dst src; do
     dst="${dst%/}"; src="${src%/}"
     if [ "$p" = "$dst" ] || [[ "$p" == "$dst/"* ]]; then echo "$src${p#"$dst"}"; return 0; fi
@@ -195,7 +209,7 @@ try:
             p = item.find("Player")
             st = p.get("state", "") if p is not None else ""
             files = [x.get("file") for x in item.iter("Part") if x.get("file")]
-            how = "session"
+            how = "session"; flag = "exact"
             if not files and item.get("ratingKey"):
                 # Transcoded sessions may not carry the source path; ask the library for it.
                 how = "library"
@@ -209,11 +223,13 @@ try:
                             if mid and med.get("id") == mid:
                                 match.append(x.get("file"))
                 files = match or allf
+                if not match and len(allf) > 1:
+                    flag = "guess"   # several versions; only the one actually open will be used
             if verbose:
-                sys.stderr.write("session: %s | %s | state=%s | files=%d (%s)\n" % (
-                    item.tag, item.get("title", "?"), st or "?", len(files), how))
+                sys.stderr.write("session: %s | %s | state=%s | files=%d (%s%s)\n" % (
+                    item.tag, item.get("title", "?"), st or "?", len(files), how, ", several versions" if flag == "guess" else ""))
             for f in files:
-                print(st + "\t" + f)
+                print(st + "\t" + flag + "\t" + f)
     else:
         path = "/emby/Sessions" if t == "emby" else "/Sessions"
         hdr = {"Authorization": 'MediaBrowser Token="%s"' % k, "X-Emby-Token": k, "Accept": "application/json"}
@@ -222,7 +238,7 @@ try:
             n = s.get("NowPlayingItem")
             if n and n.get("Path"):
                 st = "paused" if (s.get("PlayState") or {}).get("IsPaused") else "playing"
-                print(st + "\t" + n["Path"])
+                print(st + "\texact\t" + n["Path"])
 except Exception as e:
     print("media server query failed: %s" % e)
     sys.exit(1)
@@ -265,11 +281,22 @@ pool_has_room() {  # $1 = bytes to add
   [ -n "$avail" ] && [ $((avail - $1)) -gt $((MIN_FREE_GB * 1024 * 1024 * 1024)) ]
 }
 
-share_pool_ok() {  # target pool must be the share's primary pool unless ALLOW_OTHER_POOL=yes
-  local share="$1" sp
-  [ "$ALLOW_OTHER_POOL" = "yes" ] && return 0
-  sp=$(tr -d '\r' 2>/dev/null < "/boot/config/shares/$share.cfg" | grep -oP '^shareCachePool="\K[^"]*')
-  [ "$sp" = "$POOL" ]
+share_cfg() { tr -d '\r' 2>/dev/null < "/boot/config/shares/$1.cfg" | grep -oP "^$2=\"\\K[^\"]*"; }
+
+# 0 = share is usable; otherwise prints the reason. Needs "pool first, array second" (shareUseCache=yes):
+# with "prefer" the mover moves files onto the pool and would collide with Stagehand's copies.
+share_pool_ok() {
+  local share="$1" uc sp
+  uc=$(share_cfg "$share" shareUseCache); sp=$(share_cfg "$share" shareCachePool)
+  [ -f "/boot/config/shares/$share.cfg" ] || { echo "no share config found"; return 1; }
+  case "$uc" in
+    yes) ;;
+    prefer) echo "share is set to array first, pool second (mover moves files onto the pool)"; return 1 ;;
+    only)   echo "share is pool-only (nothing on the array to cache)"; return 1 ;;
+    *)      echo "share does not use a pool (array only)"; [ "$ALLOW_OTHER_POOL" = "yes" ] || return 1 ;;
+  esac
+  [ "$sp" = "$POOL" ] || [ "$ALLOW_OTHER_POOL" = "yes" ] || { echo "share's primary pool is $sp, not $POOL"; return 1; }
+  return 0
 }
 
 ########## state ##########
@@ -432,13 +459,17 @@ mover_tuning_reads_list() {
 }
 
 ########## run ##########
-handle_title() {  # state server_path
-  local st="$1" sp="$2" host share rel arr dst first size
-  host=$(to_host_path "$sp") || { log INFO "no path mapping for: $sp"; return; }
+handle_title() {  # state flag server_path
+  local st="$1" flag="$2" sp="$3" host share rel arr dst first size why
+  host=$(to_host_path "$sp") || { warn_once "map:${sp%/*}" "no path mapping for: $sp"; return; }
   IFS=$'\t' read -r share rel < <(split_share "$host") || return
   [ -n "$rel" ] || return
   in_list "$share" $SHARES || return
   passes_filters "$rel" || return
+  if [[ "$host" != /mnt/user/* ]]; then
+    warn_once "direct:$share" "media server reads $host directly, not through /mnt/user; live switching is impossible, skipping share $share (map its library to /mnt/user/... instead)"
+    return
+  fi
   dst=$(pool_path "$share" "$rel")
   arr=$(array_copy "$share" "$rel")
 
@@ -448,7 +479,9 @@ handle_title() {  # state server_path
     return
   fi
 
-  share_pool_ok "$share" || { warn_once "pool:$share" "share $share does not use $POOL as its primary pool; skipping its titles (ALLOW_OTHER_POOL=no)"; return; }
+  why=$(share_pool_ok "$share") || { warn_once "pool:$share" "skipping share $share: $why"; return; }
+  # Several versions of this title and Plex did not say which is playing: only act on the one being read.
+  if [ "$flag" = "guess" ] && [ ! -f "$dst" ] && [ -z "$(shfs_fds_for "$arr")" ]; then return; fi
 
   if [ -f "$dst" ]; then
     # Already cached. Keep it alive and retry the switch if playback is still on the array.
@@ -465,7 +498,6 @@ handle_title() {  # state server_path
     return
   fi
 
-  local why
   why=$(pool_healthy) || { log WARN "pool not healthy, not copying: $why"; return; }
   size=$(stat -c %s "$arr")
   pool_has_room "$size" || { log WARN "not enough free space on $POOL (MIN_FREE_GB=$MIN_FREE_GB): $rel"; return; }
@@ -478,14 +510,39 @@ handle_title() {  # state server_path
     item_upsert "$dst" "$share" "$rel" "$size" "$NOW" "$NOW" "playing" "$(stat -c %Y "$arr")"
     switch_playback "$arr" "$dst" "$rel"
   fi
+  copy_sidecars "$share" "$rel"
   copy_next_episodes "$share" "$rel"
+}
+
+copy_sidecars() {  # share rel : subtitle files named like the video (Show.S01E01.en.srt)
+  local share="$1" rel="$2" dir base stem f ext arr dst size
+  [ "$COPY_SIDECARS" = "yes" ] || return 0
+  dir=$(dirname "$rel"); base=$(basename "$rel"); stem="${base%.*}"
+  while IFS= read -r f; do
+    [[ "$f" == "$stem."* ]] || continue
+    ext="${f##*.}"; ext="${ext,,}"
+    in_list "$ext" $SIDECAR_TYPES || continue
+    dst=$(pool_path "$share" "$dir/$f")
+    [ -f "$dst" ] && continue
+    arr=$(array_copy "$share" "$dir/$f") || continue
+    size=$(stat -c %s "$arr")
+    if [ $DRY -eq 1 ]; then log COPY "would copy sidecar: $dir/$f"
+    else copy_to_pool "$arr" "$dst" "$share" "$dir/$f" && item_upsert "$dst" "$share" "$dir/$f" "$size" "$NOW" "$NOW" "sidecar" "$(stat -c %Y "$arr")"; fi
+  done < <(ls -1 "/mnt/user/$share/$dir" 2>/dev/null)
+}
+
+is_episode() {  # rel : true when the file looks like a TV episode
+  local dir base; dir=$(dirname "$1"); base=$(basename "$1")
+  [[ "$base" =~ $NEXT_EPISODE_REGEX ]] && return 0
+  case "${dir,,}" in *season*|*specials*|*staffel*|*saison*|*temporada*|*stagione*|*seizoen*) return 0 ;; esac
+  return 1
 }
 
 copy_next_episodes() {  # share rel
   local share="$1" rel="$2" dir base n=0 f arr dst size budget
   [ "$NEXT_EPISODES" -gt 0 ] 2>/dev/null || return 0
   dir=$(dirname "$rel"); base=$(basename "$rel")
-  case "${dir,,}" in *season*|*specials*) ;; *) return 0 ;; esac
+  is_episode "$rel" || return 0
   budget=$((MAX_COPY_GB_PER_RUN * 1024 * 1024 * 1024))
   while IFS= read -r f; do
     [ "$n" -ge "$NEXT_EPISODES" ] && break
@@ -499,7 +556,7 @@ copy_next_episodes() {  # share rel
     pool_has_room "$size" || { log WARN "not enough free space for next episode: $dir/$f"; break; }
     budget=$((budget - size))
     if [ $DRY -eq 1 ]; then log COPY "would copy next episode $(( size / 1048576 )) MB: $dir/$f"
-    else copy_to_pool "$arr" "$dst" "$share" "$dir/$f" && item_upsert "$dst" "$share" "$dir/$f" "$size" "$NOW" "$NOW" "next" "$(stat -c %Y "$arr")"; fi
+    else copy_to_pool "$arr" "$dst" "$share" "$dir/$f" && item_upsert "$dst" "$share" "$dir/$f" "$size" "$NOW" "$NOW" "next" "$(stat -c %Y "$arr")" && copy_sidecars "$share" "$dir/$f"; fi
   done < <(ls -1 "/mnt/user/$share/$dir" 2>/dev/null | LC_ALL=C sort | awk -v b="$base" 'f{print} $0==b{f=1}')
 }
 
@@ -532,8 +589,9 @@ cmd_run() {
   check_orphans
   if ! out=$(get_sessions); then log ERROR "$out"; return 1; fi
   [ -z "$out" ] && { seen_prune; return 0; }
-  while IFS=$'\t' read -r st sp; do
-    [ -n "$sp" ] && handle_title "$st" "$sp"
+  local fl
+  while IFS=$'\t' read -r st fl sp; do
+    [ -n "$sp" ] && handle_title "$st" "$fl" "$sp"
   done <<< "$out"
   seen_prune
   update_mover_ignore
@@ -590,14 +648,14 @@ cmd_check() {
   for x in gdb rsync python3 docker; do command -v "$x" >/dev/null && echo "ok   $x found" || { echo "FAIL $x missing"; ok=0; }; done
   [ -d "/mnt/$POOL" ] && echo "ok   pool /mnt/$POOL mounted" || { echo "FAIL pool /mnt/$POOL missing"; ok=0; }
   for x in $SHARES; do
-    if share_pool_ok "$x"; then echo "ok   share $x uses $POOL"; else echo "WARN share $x primary pool is not $POOL"; fi
+    if out=$(share_pool_ok "$x"); then echo "ok   share $x uses $POOL (pool first, array second)"; else echo "WARN share $x: $out"; fi
   done
   out=$(pool_healthy) && echo "ok   pool health" || echo "WARN pool health: $out"
   echo "--   pool free: $(df -h --output=avail "/mnt/$POOL" | tail -1 | tr -d ' ') (minimum ${MIN_FREE_GB}G)"
   echo "--   source roots: $(source_roots | paste -sd' ')"
   echo "--   path map:"; path_map_lines | sed 's/^/       /'
   if out=$(get_sessions); then echo "ok   media server reachable; active sessions: $(grep -c . <<< "$out")"
-    while IFS=$'\t' read -r x sp; do [ -n "$sp" ] && echo "       $x  $sp  ->  $(to_host_path "$sp" || echo 'NO MAPPING')"; done <<< "$out"
+    local fl; while IFS=$'\t' read -r x fl sp; do [ -n "$sp" ] && echo "       $x  $sp  ->  $(to_host_path "$sp" || echo 'NO MAPPING')"; done <<< "$out"
   else echo "FAIL media server: $out"; ok=0; fi
   if [ "$MANAGE_MOVER_IGNORE" = "yes" ]; then
     mover_tuning_reads_list; case $? in
@@ -611,18 +669,20 @@ cmd_check() {
 }
 
 cmd_explain() {  # read-only: show how each active session would be handled and why
-  local out st sp host share rel arr dst
+  local out st sp host share rel arr dst fl why
   if ! out=$(SH_VERBOSE=1 get_sessions); then echo "media server: $out"; return 1; fi
   [ -z "$out" ] && { echo "no active sessions with a file path"; return 0; }
-  while IFS=$'\t' read -r st sp; do
+  while IFS=$'\t' read -r st fl sp; do
     [ -z "$sp" ] && continue
-    echo "== [$st] $sp"
+    echo "== [$st${fl:+, $fl}] $sp"
     host=$(to_host_path "$sp") || { echo "   -> no path mapping: SKIP"; continue; }
     echo "   host path: $host"
     IFS=$'\t' read -r share rel < <(split_share "$host")
     echo "   share: $share   rel: $rel"
     in_list "$share" $SHARES || { echo "   -> share not in SHARES: SKIP"; continue; }
     passes_filters "$rel" || { echo "   -> filtered out (FILETYPES/SUBFOLDERS/EXCLUSIONS): SKIP"; continue; }
+    [[ "$host" == /mnt/user/* ]] || { echo "   -> media server reads this directly, not through /mnt/user: live switch impossible, SKIP"; continue; }
+    why=$(share_pool_ok "$share") || { echo "   -> share not usable: $why: SKIP"; continue; }
     arr=$(array_copy "$share" "$rel"); dst=$(pool_path "$share" "$rel")
     echo "   array copy: ${arr:-none}"
     echo "   pool copy : $( [ -f "$dst" ] && echo "$dst" || echo none)"
@@ -632,7 +692,8 @@ cmd_explain() {  # read-only: show how each active session would be handled and 
     fi
     if [ -z "$arr" ]; then echo "   -> not on the array (already on pool or elsewhere): nothing to do"
     elif [ -f "$dst" ]; then echo "   -> already cached: run would retry the switch if the array fd is still open"
-    else echo "   -> run would copy after ${WAIT_SECONDS}s of playback, then switch"; fi
+    elif [ "$fl" = "guess" ] && [ -z "$(shfs_fds_for "$arr")" ]; then echo "   -> one of several versions and not the one being read: SKIP"
+    else echo "   -> run would copy after ${WAIT_SECONDS}s of playback, then switch$(is_episode "$rel" && [ "$NEXT_EPISODES" -gt 0 ] && echo ", then the next $NEXT_EPISODES episode(s)")"; fi
   done <<< "$out"
 }
 

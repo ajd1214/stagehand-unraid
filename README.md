@@ -31,6 +31,25 @@ When someone starts watching a title that lives on a spinning array disk, Stageh
 - The media server must read media through `/mnt/user/...` paths (the default for Docker templates).
 - `gdb`, `python3`, `rsync`, `docker`. `gdb` and `python3` may not be part of stock Unraid; on DENNAS they currently come from the Cache Mover plugin's packages. Stage 2 will install them itself.
 
+## Library layouts
+
+Stagehand does not care how shares are organized. Set `SHARES` to the user shares holding media and `SUBFOLDERS` to the folder names inside them, for example:
+
+| Layout | Settings |
+|---|---|
+| Separate shares `data_tv`, `data_movies` | `SHARES="data_tv data_movies"`, `SUBFOLDERS="tv_main movies_main ..."` |
+| One `media` share with `tv/` and `movies/` | `SHARES="media"`, `SUBFOLDERS="tv movies"` |
+| TRaSH-style `data` share (`data/media/tv`) | `SHARES="data"`, `SUBFOLDERS="tv movies"` |
+
+Requirements and limits:
+
+- Each share must be set to **pool first, array second**. Shares set to array first, pool second ("prefer"), pool-only or array-only are skipped with a warning.
+- The media server must read through `/mnt/user/...`. If it reads `/mnt/diskN` or a pool directly, live switching is impossible and Stagehand skips that share with a warning.
+- Episodes are recognized by an `S01E02`-style name or a season folder (Season, Specials, Staffel, Saison, Temporada, Stagione, Seizoen). Anything else gets no next-episode copy.
+- When Plex lists several versions of a title without saying which is playing, only the version actually being read is copied.
+- Media servers on another machine or a VM need a manual `PATH_MAP`, for example `PATH_MAP="Z:\TV Shows=>/mnt/user/data_tv"`.
+- One media server at a time. mergerfs setups are not supported yet.
+
 ## Install (Stage 1, manual)
 
 ```bash

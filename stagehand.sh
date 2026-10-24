@@ -8,6 +8,7 @@
 #   run    one cycle: detect playback, copy, switch, copy next episodes (cron: every minute)
 #   clean  release expired pool copies that have a verified array twin (cron: hourly)
 #   check  validate config and environment, change nothing
+#   explain show how each active session would be handled and why (read-only)
 #   status show tracked items
 #
 # Design credit: alturismo's Cache Mover (https://github.com/alturismo/unraid-cache-mover).
@@ -553,6 +554,32 @@ cmd_check() {
   [ $ok -eq 1 ] && echo "RESULT: ready" || echo "RESULT: problems found"
 }
 
+cmd_explain() {  # read-only: show how each active session would be handled and why
+  local out st sp host share rel arr dst
+  if ! out=$(get_sessions); then echo "media server: $out"; return 1; fi
+  [ -z "$out" ] && { echo "no active sessions"; return 0; }
+  while IFS=$'\t' read -r st sp; do
+    [ -z "$sp" ] && continue
+    echo "== [$st] $sp"
+    host=$(to_host_path "$sp") || { echo "   -> no path mapping: SKIP"; continue; }
+    echo "   host path: $host"
+    IFS=$'\t' read -r share rel < <(split_share "$host")
+    echo "   share: $share   rel: $rel"
+    in_list "$share" $SHARES || { echo "   -> share not in SHARES: SKIP"; continue; }
+    passes_filters "$rel" || { echo "   -> filtered out (FILETYPES/SUBFOLDERS/EXCLUSIONS): SKIP"; continue; }
+    arr=$(array_copy "$share" "$rel"); dst=$(pool_path "$share" "$rel")
+    echo "   array copy: ${arr:-none}"
+    echo "   pool copy : $( [ -f "$dst" ] && echo "$dst" || echo none)"
+    if [ -n "$arr" ]; then
+      echo "   shfs fds on array copy: $(shfs_fds_for "$arr" | paste -sd',' || true)"
+      [ -n "$(shfs_fds_for "$arr")" ] || echo "   (none: not being read from the array right now)"
+    fi
+    if [ -z "$arr" ]; then echo "   -> not on the array (already on pool or elsewhere): nothing to do"
+    elif [ -f "$dst" ]; then echo "   -> already cached: run would retry the switch if the array fd is still open"
+    else echo "   -> run would copy after ${WAIT_SECONDS}s of playback, then switch"; fi
+  done <<< "$out"
+}
+
 cmd_status() {
   local pool share rel size copied last reason
   printf '%-8s %-8s %8s  %s\n' "age_h" "idle_h" "MB" "item"
@@ -566,8 +593,9 @@ cmd_status() {
 ########## main ##########
 case "$CMD" in
   check) cmd_check; exit 0 ;;
+  explain) cmd_explain; exit 0 ;;
   run|clean|status) ;;
-  *) echo "usage: $0 [run|clean|check|status] [-c cfg]" >&2; exit 2 ;;
+  *) echo "usage: $0 [run|clean|check|explain|status] [-c cfg]" >&2; exit 2 ;;
 esac
 
 state_init || { echo "cannot create state dir $STATE_DIR" >&2; exit 1; }

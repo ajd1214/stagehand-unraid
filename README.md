@@ -47,6 +47,7 @@ bash /boot/config/plugins/stagehand/stagehand.sh check
 | Command | What it does |
 |---|---|
 | `stagehand.sh check` | Validate config and environment. Changes nothing. |
+| `stagehand.sh explain` | Show how each active playback session would be handled and why. Changes nothing. |
 | `stagehand.sh run` | One cycle: detect, copy, switch, copy next episodes. Schedule every minute. |
 | `stagehand.sh clean` | Release expired pool copies with a verified array twin. Schedule hourly. |
 | `stagehand.sh status` | List tracked copies with age and idle hours. |

@@ -179,20 +179,39 @@ media_token() {
 # Prints "state<TAB>server_path" per active session. Exit 1 on error (message on stdout).
 get_sessions() {
   local tok; tok=$(media_token) || { echo "could not read media server token"; return 1; }
-  SH_TYPE="$MEDIASERVER_TYPE" SH_URL="$MEDIASERVER_URL" SH_TOKEN="$tok" python3 - <<'PY'
+  SH_TYPE="$MEDIASERVER_TYPE" SH_URL="$MEDIASERVER_URL" SH_TOKEN="$tok" SH_VERBOSE="${SH_VERBOSE:-0}" python3 - <<'PY'
 import os, sys, json, urllib.request, xml.etree.ElementTree as ET
 t = os.environ["SH_TYPE"]; u = os.environ["SH_URL"].rstrip("/"); k = os.environ["SH_TOKEN"]
+verbose = os.environ.get("SH_VERBOSE") == "1"
 try:
     if t == "plex":
-        req = urllib.request.Request(u + "/status/sessions", headers={"X-Plex-Token": k, "Accept": "application/xml"})
-        root = ET.fromstring(urllib.request.urlopen(req, timeout=10).read())
+        hdr = {"X-Plex-Token": k, "Accept": "application/xml"}
+        def get(path):
+            return ET.fromstring(urllib.request.urlopen(urllib.request.Request(u + path, headers=hdr), timeout=10).read())
+        root = get("/status/sessions")
         for item in root:
             p = item.find("Player")
             st = p.get("state", "") if p is not None else ""
-            for part in item.iter("Part"):
-                f = part.get("file")
-                if f:
-                    print(st + "\t" + f)
+            files = [x.get("file") for x in item.iter("Part") if x.get("file")]
+            how = "session"
+            if not files and item.get("ratingKey"):
+                # Transcoded sessions may not carry the source path; ask the library for it.
+                how = "library"
+                m = item.find("Media"); mid = m.get("id") if m is not None else None
+                meta = get("/library/metadata/" + item.get("ratingKey"))
+                allf, match = [], []
+                for med in meta.iter("Media"):
+                    for x in med.iter("Part"):
+                        if x.get("file"):
+                            allf.append(x.get("file"))
+                            if mid and med.get("id") == mid:
+                                match.append(x.get("file"))
+                files = match or allf
+            if verbose:
+                sys.stderr.write("session: %s | %s | state=%s | files=%d (%s)\n" % (
+                    item.tag, item.get("title", "?"), st or "?", len(files), how))
+            for f in files:
+                print(st + "\t" + f)
     else:
         path = "/emby/Sessions" if t == "emby" else "/Sessions"
         hdr = {"Authorization": 'MediaBrowser Token="%s"' % k, "X-Emby-Token": k, "Accept": "application/json"}
@@ -556,8 +575,8 @@ cmd_check() {
 
 cmd_explain() {  # read-only: show how each active session would be handled and why
   local out st sp host share rel arr dst
-  if ! out=$(get_sessions); then echo "media server: $out"; return 1; fi
-  [ -z "$out" ] && { echo "no active sessions"; return 0; }
+  if ! out=$(SH_VERBOSE=1 get_sessions); then echo "media server: $out"; return 1; fi
+  [ -z "$out" ] && { echo "no active sessions with a file path"; return 0; }
   while IFS=$'\t' read -r st sp; do
     [ -z "$sp" ] && continue
     echo "== [$st] $sp"

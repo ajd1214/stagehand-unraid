@@ -27,7 +27,7 @@ done
 [ -z "$LC_ALL" ] && export LANG=C LC_ALL=C
 unset _l
 
-STAGEHAND_VERSION="2026.10.24c"
+STAGEHAND_VERSION="2026.10.24d"
 CMD="${1:-run}"; shift || true
 CFG=""
 while [ $# -gt 0 ]; do

@@ -29,13 +29,16 @@ function api($path) {
     if ($data === null) throw new Exception("bad JSON from /api/v3/" . strtok($path, '?'));
     return $data;
 }
-// host path -> the same path as this container sees it, or null when no mount covers it
+// host path -> every path this container can see it under (a host folder may be mounted
+// more than once, e.g. /mnt/user/data_tv at /data_tv and /mnt/user at /mnt/user).
+// Most specific mount first. Empty when no mount covers it.
 function to_container($host) {
     global $mounts;
+    $out = [];
     foreach ($mounts as [$dst, $src]) {
-        if ($host === $src || strpos($host, "$src/") === 0) return $dst . substr($host, strlen($src));
+        if ($host === $src || strpos($host, "$src/") === 0) $out[] = $dst . substr($host, strlen($src));
     }
-    return null;
+    return array_values(array_unique($out));
 }
 function under($file, $folder) { $folder = rtrim($folder, '/'); return $folder !== '' && strpos($file, "$folder/") === 0; }
 
@@ -49,22 +52,23 @@ try {
         exit(0);
     }
     if ($cmd !== 'owns' || empty($argv[2])) throw new Exception("usage: owns <host_path>");
-    $file = to_container($argv[2]);
-    if ($file === null) { echo "unmanaged\n"; exit(0); }   // this container cannot even see the file
+    $files = to_container($argv[2]);
+    if (!$files) { echo "unmanaged\n"; exit(0); }   // this container cannot even see the file
+    $under_any = function ($folder) use ($files) { foreach ($files as $f) if (under($f, $folder)) return true; return false; };
 
     if ($type === 'sonarr') {
         foreach (api('series') as $s) {
-            if (!under($file, $s['path'] ?? '')) continue;
+            if (!$under_any($s['path'] ?? '')) continue;
             foreach (api('episodefile?seriesId=' . (int)$s['id']) as $ef) {
-                if (($ef['path'] ?? '') === $file) { echo "owned\n"; exit(0); }
+                if (in_array($ef['path'] ?? '', $files, true)) { echo "owned\n"; exit(0); }
             }
             echo "not-owned\n"; exit(0);
         }
     } else {
         foreach (api('movie') as $m) {
-            if (!under($file, $m['path'] ?? '')) continue;
+            if (!$under_any($m['path'] ?? '')) continue;
             foreach (api('moviefile?movieId=' . (int)$m['id']) as $mf) {
-                if (($mf['path'] ?? '') === $file) { echo "owned\n"; exit(0); }
+                if (in_array($mf['path'] ?? '', $files, true)) { echo "owned\n"; exit(0); }
             }
             echo "not-owned\n"; exit(0);
         }

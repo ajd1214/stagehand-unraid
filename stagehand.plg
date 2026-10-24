@@ -2,13 +2,13 @@
 <!DOCTYPE PLUGIN [
 <!ENTITY name      "stagehand">
 <!ENTITY author    "ajd1214">
-<!ENTITY version   "2026.10.24c">
+<!ENTITY version   "2026.10.24d">
 <!ENTITY launch    "Utilities/Stagehand">
 <!ENTITY gitURL    "https://raw.githubusercontent.com/ajd1214/stagehand-unraid/main">
 <!ENTITY pluginURL "&gitURL;/stagehand.plg">
 <!ENTITY plgPATH   "/boot/config/plugins/&name;">
 <!ENTITY emhttp    "/usr/local/emhttp/plugins/&name;">
-<!ENTITY pkgSHA    "9d256f38bd17d8d2c75402936ed4f3118ae1b979de7812a76288af3efbf11ee0">
+<!ENTITY pkgSHA    "5d3026a08fe944d1b03742bb37fbd5675a4dc23c673cf8775804147650191e33">
 <!ENTITY gdbPKG    "gdb-15.2-x86_64-3">
 <!ENTITY gdbSHA    "88f0417bb73d1fc6c0f6a955f0ff6b3667a17698162ba0340079c1cf9628c4a1">
 ]>
@@ -21,6 +21,9 @@
         min="7.0.0">
 
 <CHANGES>
+###2026.10.24d
+- Sonarr/Radarr leftover check now works when a container sees the library under more than one path (for example /data_tv and /mnt/user/data_tv)
+
 ###2026.10.24c
 - New: Release all now button (release-all command) empties Stagehand's pool copies, ignoring keep time. Same safety checks as clean. Works while paused.
 

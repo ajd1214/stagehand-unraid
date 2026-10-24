@@ -13,7 +13,12 @@
 # Design credit: alturismo's Cache Mover (https://github.com/alturismo/unraid-cache-mover).
 
 set -o pipefail
-export LANG=C.UTF-8 LC_ALL=C.UTF-8
+# Use a UTF-8 locale when one exists (Unraid ships en_US.UTF-8, not C.UTF-8), else plain C.
+for _l in en_US.UTF-8 en_US.utf8 C.UTF-8; do
+  if locale -a 2>/dev/null | grep -qix "${_l/UTF-8/utf8}\|$_l"; then export LANG="$_l" LC_ALL="$_l"; break; fi
+done
+[ -z "$LC_ALL" ] && export LANG=C LC_ALL=C
+unset _l
 
 STAGEHAND_VERSION="0.1.0-stage1"
 CMD="${1:-run}"; shift || true

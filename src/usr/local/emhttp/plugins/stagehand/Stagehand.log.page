@@ -1,0 +1,19 @@
+Menu="Stagehand:1"
+Title="Log"
+Tag="icon-disk"
+Markdown="false"
+---
+<?php
+$plugin = "/usr/local/emhttp/plugins/stagehand";
+$cfg = [];
+foreach (["$plugin/default.cfg", "/boot/config/plugins/stagehand/stagehand.cfg"] as $f) {
+  if (!is_file($f)) continue;
+  foreach (file($f, FILE_IGNORE_NEW_LINES) as $l) if (preg_match('/^([A-Z_][A-Z0-9_]*)="(.*)"\s*$/', rtrim($l, "\r"), $m)) $cfg[$m[1]] = $m[2];
+}
+$log = $cfg['LOG_FILE'] ?? '';
+$lines = is_file($log) ? array_slice(file($log, FILE_IGNORE_NEW_LINES), -500) : ["(no log yet: $log)"];
+?>
+<div class="title"><span class="left"><i class="fa fa-list title"></i>Last 500 log lines (newest at the bottom)</span>
+<span class="right"><input type="button" value="Refresh" onclick="location.reload()"></span></div>
+<pre id="sh_log" style="height:600px;overflow:auto;white-space:pre-wrap;font-family:monospace;font-size:12px"><?=htmlspecialchars(implode("\n", $lines))?></pre>
+<script>var l=document.getElementById('sh_log'); if (l) l.scrollTop=l.scrollHeight;</script>

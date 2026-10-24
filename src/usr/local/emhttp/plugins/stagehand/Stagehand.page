@@ -1,0 +1,139 @@
+Menu="Utilities"
+Type="xmenu"
+Title="Stagehand"
+Icon="stagehand.png"
+Tag="icon-disk"
+Tabs="true"
+Markdown="false"
+---
+<?php
+// Stagehand settings page. Saves through Unraid's /update.php, then runs "stagehand.sh apply"
+// so the schedule matches the saved settings.
+$plugin  = "/usr/local/emhttp/plugins/stagehand";
+$cfgfile = "/boot/config/plugins/stagehand/stagehand.cfg";
+
+function sh_read_cfg($file) {
+  $out = [];
+  if (!is_file($file)) return $out;
+  foreach (file($file, FILE_IGNORE_NEW_LINES) as $line) {
+    $line = rtrim($line, "\r");
+    if (preg_match('/^([A-Z_][A-Z0-9_]*)="(.*)"\s*$/', $line, $m)) $out[$m[1]] = $m[2];
+  }
+  return $out;
+}
+$cfg = array_merge(sh_read_cfg("$plugin/default.cfg"), sh_read_cfg($cfgfile));
+function v($k) { global $cfg; return htmlspecialchars($cfg[$k] ?? '', ENT_QUOTES); }
+
+// [key, label, type, help]  type: text | password | yesno | list of options
+$sections = [
+  'Master controls' => [
+    ['ENABLED', 'Enable Stagehand', 'yesno', 'No = every run exits immediately.'],
+    ['DRY_RUN', 'Dry run', 'yesno', 'Yes = only log what would happen. Nothing is copied, switched, deleted or edited.'],
+    ['SCHEDULE', 'Run on a schedule', 'yesno', 'Yes = run automatically using the two schedules below.'],
+    ['RUN_CRON', 'Copy/switch schedule', 'text', 'Cron format. Every minute is recommended: * * * * *'],
+    ['CLEAN_CRON', 'Release schedule', 'text', 'Cron format. Hourly is recommended: 17 * * * *'],
+  ],
+  'What to cache' => [
+    ['POOL', 'Target pool', 'text', 'Pool name as in /mnt/&lt;pool&gt;. Must be the primary pool of the shares below.'],
+    ['SHARES', 'Shares', 'text', 'User shares holding media, space separated.'],
+    ['SUBFOLDERS', 'Media folders', 'text', 'Only files whose path contains one of these folder names, space separated.'],
+    ['EXCLUSIONS', 'Exclusions', 'text', 'Skip files whose path contains any of these, space separated.'],
+    ['FILETYPES', 'File types', 'text', 'Media extensions without dots, space separated.'],
+    ['WAIT_SECONDS', 'Wait before copy (seconds)', 'text', 'A title must be seen playing this long before it is copied.'],
+    ['NEXT_EPISODES', 'Next episodes to copy', 'text', 'After the playing episode, copy this many following episodes. 0 = off.'],
+    ['COPY_SIDECARS', 'Copy subtitles', 'yesno', 'Also copy subtitle files named like the video.'],
+    ['SIDECAR_TYPES', 'Subtitle types', 'text', 'Extensions without dots, space separated.'],
+  ],
+  'Live switch' => [
+    ['SWITCH_MODE', 'Switch mode', ['switch', 'close', 'none'], 'switch = move playback to the SSD copy live. close = close the array file; the player reopens on the SSD copy. none = copy only.'],
+    ['GDB_TIMEOUT_SECONDS', 'Switch timeout (seconds)', 'text', 'Abort a live switch that takes longer than this.'],
+  ],
+  'Keep and release' => [
+    ['KEEP_HOURS', 'Keep hours', 'text', 'Hours a cached copy is kept after it was last played.'],
+    ['KEEP_RULES', 'Keep rules', 'text', 'Per-folder overrides as folder:hours, space separated. First match wins.'],
+    ['RELEASE_VERIFY', 'Release check', ['size', 'cmp'], 'size = same name and size on the array. cmp = full byte compare (slow).'],
+  ],
+  'Pool safety' => [
+    ['MIN_FREE_GB', 'Minimum free space (GB)', 'text', 'Never copy if the pool would drop below this.'],
+    ['HEALTH_CHECK', 'Pool health check', 'yesno', 'Skip copying when the pool reports errors, recent I/O errors or is read-only.'],
+    ['MAX_COPY_GB_PER_RUN', 'Max next-episode GB per run', 'text', 'Limits next-episode copies. The playing file is always allowed.'],
+    ['COPY_BWLIMIT_KBPS', 'Copy speed limit (KB/s)', 'text', '0 = unlimited.'],
+  ],
+  'Media server' => [
+    ['MEDIASERVER_TYPE', 'Type', ['plex', 'jellyfin', 'emby'], 'Jellyfin and Emby are experimental.'],
+    ['MEDIASERVER_URL', 'URL', 'text', 'For example http://127.0.0.1:32400'],
+    ['MEDIASERVER_TOKEN', 'Token / API key', 'password', 'Plex: auto reads the token from the Plex container. Jellyfin/Emby: paste an API key.'],
+    ['MEDIASERVER_CONTAINER', 'Container name', 'text', 'Used for the auto token and auto path map.'],
+    ['PATH_MAP', 'Path map', 'text', 'auto = read the container mounts. Manual: server_path=&gt;host_path; server_path=&gt;host_path'],
+  ],
+  'Mover Tuning' => [
+    ['MANAGE_MOVER_IGNORE', 'Protect cached copies', 'yesno', 'Keep a marked block of cached files in the Mover Tuning ignore file. Your own lines are never touched.'],
+    ['MOVER_IGNORE_FILE', 'Ignore file', 'text', 'Must match the file list path set in Mover Tuning.'],
+    ['MOVER_TUNING_CFG', 'Mover Tuning config', 'text', ''],
+  ],
+  'Logging' => [
+    ['STATE_DIR', 'State folder', 'text', 'Keep off the flash drive.'],
+    ['LOG_FILE', 'Log file', 'text', ''],
+    ['LOG_MAX_MB', 'Log size limit (MB)', 'text', ''],
+    ['SYSLOG', 'Also log to syslog', 'yesno', ''],
+    ['NOTIFY', 'Unraid notifications', ['none', 'errors', 'all'], ''],
+  ],
+  'Advanced' => [
+    ['SOURCE_ROOTS', 'Source roots', 'text', 'auto = array disks. Or space-separated roots.'],
+    ['ALLOW_OTHER_POOL', 'Allow a pool the share does not use', 'yesno', 'Experimental: Unraid may not serve that copy on later opens.'],
+    ['NEXT_EPISODE_REGEX', 'Episode name pattern', 'text', ''],
+    ['KILL_FILE', 'Kill file', 'text', 'If this file exists every run exits. Pause/Resume below create and remove it.'],
+    ['ORPHAN_ACTION', 'Leftover files', ['report'], 'Report only. Stagehand never deletes array files.'],
+  ],
+];
+
+$paused   = is_file($cfg['KILL_FILE'] ?? '');
+$cronon   = is_file("/boot/config/plugins/stagehand/stagehand.cron");
+$mtcfg    = $cfg['MOVER_TUNING_CFG'] ?? '';
+$mtlist   = is_file($mtcfg) && preg_match('/^filelistf="yes"/m', str_replace("\r", "", file_get_contents($mtcfg)));
+$gdbok    = trim(shell_exec('command -v gdb 2>/dev/null')) !== '';
+function badge($ok, $yes, $no) { return $ok ? "<span style='color:#3c3'>$yes</span>" : "<span style='color:#e22'>$no</span>"; }
+?>
+
+<div class="title"><span class="left"><i class="fa fa-film title"></i>Status</span></div>
+<dl><dt>Stagehand:</dt><dd><?=badge(($cfg['ENABLED'] ?? '') === 'yes' && !$paused, 'enabled', $paused ? 'paused (kill file present)' : 'disabled')?> &nbsp; <?=($cfg['DRY_RUN'] ?? 'yes') === 'yes' ? "<span style='color:#e90'>dry run</span>" : "<span style='color:#3c3'>live</span>"?></dd></dl>
+<dl><dt>Schedule:</dt><dd><?=badge($cronon, 'on', 'off')?></dd></dl>
+<dl><dt>Mover Tuning ignore list:</dt><dd><?=badge($mtlist, 'on', 'off: cached copies are not protected from the mover')?></dd></dl>
+<dl><dt>gdb (needed for live switch):</dt><dd><?=badge($gdbok, 'installed', 'missing')?></dd></dl>
+
+<form method="POST" action="/update.php" target="progressFrame" style="display:inline">
+<input type="hidden" name="#command" value="<?=$plugin?>/stagehand.sh">
+<?php if ($paused):?>
+<input type="hidden" name="#arg[1]" value="resume"><input type="submit" value="Resume">
+<?php else:?>
+<input type="hidden" name="#arg[1]" value="pause"><input type="submit" value="Pause now" title="Stops all runs within a minute. Playback is not affected.">
+<?php endif;?>
+</form>
+<?php if (!$mtlist):?>
+<form method="POST" action="/update.php" target="progressFrame" style="display:inline" onsubmit="return confirm('Back up Mover Tuning\'s config, then turn on its ignore list using the file shown under Mover Tuning below?');">
+<input type="hidden" name="#command" value="<?=$plugin?>/stagehand.sh">
+<input type="hidden" name="#arg[1]" value="enable-mover-ignore">
+<input type="submit" value="Enable in Mover Tuning">
+</form>
+<?php endif;?>
+
+<form method="POST" action="/update.php" target="progressFrame">
+<input type="hidden" name="#file" value="<?=$cfgfile?>">
+<input type="hidden" name="#command" value="<?=$plugin?>/stagehand.sh">
+<input type="hidden" name="#arg[1]" value="apply">
+<?php foreach ($sections as $title => $rows):?>
+<div class="title"><span class="left"><i class="fa fa-sliders title"></i><?=$title?></span></div>
+<?php foreach ($rows as [$key, $label, $type, $help]):?>
+<dl><dt><?=$label?>:</dt><dd>
+<?php if ($type === 'yesno') $type = ['yes', 'no'];?>
+<?php if (is_array($type)):?>
+<select name="<?=$key?>"><?php foreach ($type as $opt):?><option value="<?=$opt?>"<?=v($key) === $opt ? ' selected' : ''?>><?=$opt?></option><?php endforeach;?></select>
+<?php else:?>
+<input type="<?=$type === 'password' ? 'password' : 'text'?>" name="<?=$key?>" value="<?=v($key)?>" style="width:440px">
+<?php endif;?>
+</dd></dl>
+<?php if ($help):?><blockquote class="inline_help"><p><?=$help?></p></blockquote><?php endif;?>
+<?php endforeach;?>
+<?php endforeach;?>
+<dl><dt>&nbsp;</dt><dd><input type="submit" value="Apply"><input type="button" value="Done" onclick="done()"></dd></dl>
+</form>

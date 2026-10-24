@@ -1,0 +1,79 @@
+<?xml version='1.0' standalone='yes'?>
+<!DOCTYPE PLUGIN [
+<!ENTITY name      "stagehand">
+<!ENTITY author    "ajd1214">
+<!ENTITY version   "2026.10.24">
+<!ENTITY launch    "Utilities/Stagehand">
+<!ENTITY gitURL    "https://raw.githubusercontent.com/ajd1214/stagehand-unraid/main">
+<!ENTITY pluginURL "&gitURL;/stagehand.plg">
+<!ENTITY plgPATH   "/boot/config/plugins/&name;">
+<!ENTITY emhttp    "/usr/local/emhttp/plugins/&name;">
+<!ENTITY pkgSHA    "2a1ca90f827008e69bb53b02a178a659e10cb6979c4a977f58a05b18e1628e91">
+<!ENTITY gdbPKG    "gdb-15.2-x86_64-3">
+<!ENTITY gdbSHA    "88f0417bb73d1fc6c0f6a955f0ff6b3667a17698162ba0340079c1cf9628c4a1">
+]>
+<PLUGIN name="&name;"
+        author="&author;"
+        version="&version;"
+        launch="&launch;"
+        pluginURL="&pluginURL;"
+        icon="film"
+        min="7.0.0">
+
+<CHANGES>
+###2026.10.24
+- First plugin release: settings, log and lists pages; schedule; pause/resume; Mover Tuning button
+- Copies the playing file to the pool, live-switches playback, copies next episode and subtitles
+- Releases pool copies only with a verified array twin; reports leftover array files
+</CHANGES>
+
+<!-- Stagehand package -->
+<FILE Name="&plgPATH;/&name;-&version;.txz" Run="upgradepkg --install-new">
+<URL>&gitURL;/packages/&name;-&version;.txz</URL>
+<SHA256>&pkgSHA;</SHA256>
+</FILE>
+
+<!-- gdb for the live switch (installed only if not already present) -->
+<FILE Name="&plgPATH;/&gdbPKG;.txz">
+<URL>&gitURL;/packages/&gdbPKG;.txz</URL>
+<SHA256>&gdbSHA;</SHA256>
+</FILE>
+
+<!-- install / every boot -->
+<FILE Run="/bin/bash">
+<INLINE>
+P=&plgPATH;
+E=&emhttp;
+mkdir -p "$P"
+[ -f "$P/stagehand.cfg" ] || cp "$E/default.cfg" "$P/stagehand.cfg"
+chmod 755 "$E/stagehand.sh"
+if ! command -v gdb >/dev/null 2>&amp;1; then
+  installpkg "$P/&gdbPKG;.txz" >/dev/null &amp;&amp; touch "$P/.gdb-installed-by-stagehand" &amp;&amp; echo "installed gdb"
+fi
+# leftovers from the Stage 1 manual install
+rm -f "$P/stagehand.sh"
+# old package versions
+for f in "$P"/&name;-*.txz; do [ "$f" = "$P/&name;-&version;.txz" ] || rm -f "$f"; done
+bash "$E/stagehand.sh" apply
+echo "Stagehand &version; installed. Settings: Utilities > Stagehand"
+</INLINE>
+</FILE>
+
+<!-- uninstall -->
+<FILE Run="/bin/bash" Method="remove">
+<INLINE>
+P=&plgPATH;
+E=&emhttp;
+[ -f "$E/stagehand.sh" ] &amp;&amp; bash "$E/stagehand.sh" uninstall-cleanup
+rm -f "$P/stagehand.cron"
+[ -x /usr/local/sbin/update_cron ] &amp;&amp; /usr/local/sbin/update_cron
+removepkg "$P/&name;-&version;.txz" >/dev/null 2>&amp;1
+if [ -f "$P/.gdb-installed-by-stagehand" ] &amp;&amp; [ ! -f /boot/config/plugins/cache-mover.plg ]; then
+  removepkg &gdbPKG; >/dev/null 2>&amp;1
+fi
+rm -f "$P"/*.txz "$P/.gdb-installed-by-stagehand"
+echo "Stagehand removed. Settings kept in $P/stagehand.cfg. State and log kept in the state folder."
+</INLINE>
+</FILE>
+
+</PLUGIN>

@@ -4,7 +4,7 @@ Live-switch playing media from Unraid array disks to an SSD pool. Plex, Jellyfin
 
 When someone starts watching a title that lives on a spinning array disk, Stagehand copies that file to an SSD pool and switches the running playback over to the SSD copy without interrupting it. Seeks and resumes then come from the SSD, and the array disk can spin down. Later, once the copy has not been played for a set time, Stagehand deletes the pool copy, but only after proving an identical copy is still on the array.
 
-> **Status: Stage 1 (script).** Dry-run is the default. Plex is the primary target; Jellyfin and Emby are experimental. A GUI plugin (`.plg` with settings, log and list pages) is Stage 2.
+> **Status: early plugin release.** Dry-run is the default and the schedule is off until you turn it on. Plex is the primary target; Jellyfin and Emby are experimental.
 
 ## How it works
 
@@ -29,7 +29,7 @@ When someone starts watching a title that lives on a spinning array disk, Stageh
 
 - Unraid 7.x with the media files in user shares that use the SSD pool as primary storage and the array as secondary.
 - The media server must read media through `/mnt/user/...` paths (the default for Docker templates).
-- `gdb`, `python3`, `rsync`, `docker`. `gdb` and `python3` may not be part of stock Unraid; on DENNAS they currently come from the Cache Mover plugin's packages. Stage 2 will install them itself.
+- `gdb` for the live switch. The plugin installs it when it is missing. Everything else (`php`, `rsync`, `docker`) is part of Unraid.
 
 ## Library layouts
 
@@ -50,39 +50,54 @@ Requirements and limits:
 - Media servers on another machine or a VM need a manual `PATH_MAP`, for example `PATH_MAP="Z:\TV Shows=>/mnt/user/data_tv"`.
 - One media server at a time. mergerfs setups are not supported yet.
 
-## Install (Stage 1, manual)
+## Install
+
+From the Unraid web UI: **Plugins → Install Plugin**, paste the `stagehand.plg` URL, **Install**.
+
+From the command line, or while the repository is private, copy `stagehand.plg` and the two files in `packages/` to the server first, then:
 
 ```bash
 mkdir -p /boot/config/plugins/stagehand
-cp stagehand.sh stagehand.cfg /boot/config/plugins/stagehand/
-nano /boot/config/plugins/stagehand/stagehand.cfg   # review every setting
-bash /boot/config/plugins/stagehand/stagehand.sh check
+cp packages/*.txz /boot/config/plugins/stagehand/
+plugin install /path/to/stagehand.plg
 ```
 
-`check` changes nothing. It reports the tools found, pool health and free space, share pool settings, the path map, active playback sessions and how each maps to a host path, and whether Mover Tuning reads its ignore list.
+The plugin page is **Utilities → Stagehand**, with three tabs:
+
+- **Stagehand:** status, Pause/Resume, the "Enable in Mover Tuning" button and every setting. **Apply** saves and updates the schedule.
+- **Log:** the last 500 log lines.
+- **Lists:** cached copies, leftover array files, and a **Run check** button that validates everything without changing anything.
+
+Settings live in `/boot/config/plugins/stagehand/stagehand.cfg`. Removing the plugin keeps that file and the state folder, removes the schedule, and removes Stagehand's lines from the Mover Tuning ignore file.
+
+Recommended first steps: leave **Dry run** on, run the check on the Lists tab, play an array-only title and read the Log tab. Turn dry run off and the schedule on only after that looks right.
 
 ## Commands
 
+The plugin installs the script at `/usr/local/emhttp/plugins/stagehand/stagehand.sh`. Everything on the plugin page can also be run there:
+
 | Command | What it does |
 |---|---|
-| `stagehand.sh check` | Validate config and environment. Changes nothing. |
-| `stagehand.sh explain` | Show how each active playback session would be handled and why. Changes nothing. |
-| `stagehand.sh run` | One cycle: detect, copy, switch, copy next episodes. Schedule every minute. |
-| `stagehand.sh clean` | Release expired pool copies with a verified array twin. Schedule hourly. |
-| `stagehand.sh status` | List tracked copies with age and idle hours. |
+| `check` | Validate config and environment. Changes nothing. |
+| `explain` | Show how each active playback session would be handled and why. Changes nothing. |
+| `run` | One cycle: detect, copy, switch, copy next episodes. |
+| `clean` | Release expired pool copies with a verified array twin. |
+| `status` | List tracked copies and leftover array files. |
+| `apply` | Write or remove the schedule from the saved settings. |
+| `pause` / `resume` | Create or remove the kill file. |
+| `enable-mover-ignore` | Back up Mover Tuning's config and turn on its ignore list. |
 
 Add `-c /path/to/stagehand.cfg` to use a different config file.
 
 With `DRY_RUN="yes"` every action is logged as "would ..." and nothing is copied, switched, deleted or edited.
 
-## Scheduling (after testing)
+## Building
 
-With the User Scripts plugin, create two scripts:
-
-- `stagehand-run`, custom schedule `* * * * *`: `bash /boot/config/plugins/stagehand/stagehand.sh run`
-- `stagehand-clean`, custom schedule `17 * * * *`: `bash /boot/config/plugins/stagehand/stagehand.sh clean`
+`./build.sh` packs `src/` into `packages/stagehand-<version>.txz` and writes its SHA256 into `stagehand.plg`. Bump the version entity in `stagehand.plg` first.
 
 ## Turning it off fast
+
+Press **Pause now** on the plugin page, or:
 
 ```bash
 touch /boot/config/plugins/stagehand/DISABLE     # stop all runs immediately
@@ -98,7 +113,7 @@ Turning Stagehand off never affects playback. Plex keeps reading whichever copy 
 
 ## Mover Tuning
 
-With `MANAGE_MOVER_IGNORE="yes"`, Stagehand keeps a marked block of its cached files in Mover Tuning's ignore file so the mover leaves them alone until Stagehand releases them. Lines outside the block are never touched. This only works when Mover Tuning's "ignore files listed inside of a text file" option is on; `check` warns when it is off.
+With `MANAGE_MOVER_IGNORE="yes"`, Stagehand keeps a marked block of its cached files in Mover Tuning's ignore file so the mover leaves them alone until Stagehand releases them. Lines outside the block are never touched. This only works when Mover Tuning's "Ignore files and folders listed inside of a text file" option (Settings → Scheduler) is on, with the same file path. The plugin page shows whether it is on and offers an **Enable in Mover Tuning** button, which backs up Mover Tuning's config first. Stagehand never changes it without that confirmation.
 
 ## Leftover (orphan) files
 
@@ -110,7 +125,7 @@ A same-name replacement (for example a repack) writes the new file to the pool a
 
 ## Known limits
 
-- The live switch uses `gdb` to attach to `shfs`, the process that serves every user share. While attached, `shfs` pauses briefly. Stage 1 logs the measured pause for every switch so it can be judged before scheduled use. `GDB_TIMEOUT_SECONDS` caps it.
+- The live switch uses `gdb` to attach to `shfs`, the process that serves every user share. While attached, `shfs` pauses briefly. Stagehand logs the measured pause for every switch so it can be judged before scheduled use. `GDB_TIMEOUT_SECONDS` caps it.
 - Target pool other than the share's own primary pool is off by default (`ALLOW_OTHER_POOL`). It is not yet confirmed that Unraid serves such a copy on later opens.
 - Jellyfin and Emby session parsing is untested.
 

@@ -10,6 +10,10 @@
 #   check  validate config and environment, change nothing
 #   explain show how each active session would be handled and why (read-only)
 #   status show tracked items
+#   apply  write or remove the cron schedule from the config (used by the plugin page)
+#   enable-mover-ignore   back up Mover Tuning's config and turn on its ignore list
+#   uninstall-cleanup     remove Stagehand's block from the Mover Tuning ignore file
+#   pause / resume        create or remove the kill file
 #
 # Design credit: alturismo's Cache Mover (https://github.com/alturismo/unraid-cache-mover).
 
@@ -21,7 +25,7 @@ done
 [ -z "$LC_ALL" ] && export LANG=C LC_ALL=C
 unset _l
 
-STAGEHAND_VERSION="0.1.0-stage1"
+STAGEHAND_VERSION="2026.10.24"
 CMD="${1:-run}"; shift || true
 CFG=""
 while [ $# -gt 0 ]; do
@@ -34,7 +38,8 @@ done
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 if [ -z "$CFG" ]; then
   if [ -f /boot/config/plugins/stagehand/stagehand.cfg ]; then CFG=/boot/config/plugins/stagehand/stagehand.cfg
-  else CFG="$SCRIPT_DIR/stagehand.cfg"; fi
+  elif [ -f "$SCRIPT_DIR/stagehand.cfg" ]; then CFG="$SCRIPT_DIR/stagehand.cfg"
+  else CFG="$SCRIPT_DIR/default.cfg"; fi
 fi
 [ -f "$CFG" ] || { echo "config not found: $CFG" >&2; exit 2; }
 # shellcheck source=stagehand.cfg
@@ -52,6 +57,7 @@ source <(tr -d '\r' < "$CFG")
 : "${MOVER_IGNORE_FILE:=/mnt/user/system/mover/mover_ignore.txt}"
 : "${MOVER_TUNING_CFG:=/boot/config/plugins/ca.mover.tuning/ca.mover.tuning.cfg}"
 : "${SOURCE_ROOTS:=auto}" "${ALLOW_OTHER_POOL:=no}" "${ORPHAN_ACTION:=report}"
+: "${SCHEDULE:=no}" "${RUN_CRON:=* * * * *}" "${CLEAN_CRON:=17 * * * *}"
 : "${NEXT_EPISODE_REGEX:=[Ss][0-9]+[Ee][0-9]+}" "${COPY_SIDECARS:=yes}" "${SIDECAR_TYPES:=srt ass ssa sub idx vtt sup}"
 
 ITEMS="$STATE_DIR/items.tsv"     # pool_path  share  rel  size  copied_epoch  last_played_epoch  reason  array_mtime
@@ -195,54 +201,7 @@ media_token() {
 # Prints "state<TAB>server_path" per active session. Exit 1 on error (message on stdout).
 get_sessions() {
   local tok; tok=$(media_token) || { echo "could not read media server token"; return 1; }
-  SH_TYPE="$MEDIASERVER_TYPE" SH_URL="$MEDIASERVER_URL" SH_TOKEN="$tok" SH_VERBOSE="${SH_VERBOSE:-0}" python3 - <<'PY'
-import os, sys, json, urllib.request, xml.etree.ElementTree as ET
-t = os.environ["SH_TYPE"]; u = os.environ["SH_URL"].rstrip("/"); k = os.environ["SH_TOKEN"]
-verbose = os.environ.get("SH_VERBOSE") == "1"
-try:
-    if t == "plex":
-        hdr = {"X-Plex-Token": k, "Accept": "application/xml"}
-        def get(path):
-            return ET.fromstring(urllib.request.urlopen(urllib.request.Request(u + path, headers=hdr), timeout=10).read())
-        root = get("/status/sessions")
-        for item in root:
-            p = item.find("Player")
-            st = p.get("state", "") if p is not None else ""
-            files = [x.get("file") for x in item.iter("Part") if x.get("file")]
-            how = "session"; flag = "exact"
-            if not files and item.get("ratingKey"):
-                # Transcoded sessions may not carry the source path; ask the library for it.
-                how = "library"
-                m = item.find("Media"); mid = m.get("id") if m is not None else None
-                meta = get("/library/metadata/" + item.get("ratingKey"))
-                allf, match = [], []
-                for med in meta.iter("Media"):
-                    for x in med.iter("Part"):
-                        if x.get("file"):
-                            allf.append(x.get("file"))
-                            if mid and med.get("id") == mid:
-                                match.append(x.get("file"))
-                files = match or allf
-                if not match and len(allf) > 1:
-                    flag = "guess"   # several versions; only the one actually open will be used
-            if verbose:
-                sys.stderr.write("session: %s | %s | state=%s | files=%d (%s%s)\n" % (
-                    item.tag, item.get("title", "?"), st or "?", len(files), how, ", several versions" if flag == "guess" else ""))
-            for f in files:
-                print(st + "\t" + flag + "\t" + f)
-    else:
-        path = "/emby/Sessions" if t == "emby" else "/Sessions"
-        hdr = {"Authorization": 'MediaBrowser Token="%s"' % k, "X-Emby-Token": k, "Accept": "application/json"}
-        data = json.load(urllib.request.urlopen(urllib.request.Request(u + path, headers=hdr), timeout=10))
-        for s in data:
-            n = s.get("NowPlayingItem")
-            if n and n.get("Path"):
-                st = "paused" if (s.get("PlayState") or {}).get("IsPaused") else "playing"
-                print(st + "\texact\t" + n["Path"])
-except Exception as e:
-    print("media server query failed: %s" % e)
-    sys.exit(1)
-PY
+  SH_TYPE="$MEDIASERVER_TYPE" SH_URL="$MEDIASERVER_URL" SH_TOKEN="$tok" SH_VERBOSE="${SH_VERBOSE:-0}" php "$SCRIPT_DIR/sessions.php"
 }
 
 ########## pool checks ##########
@@ -645,7 +604,7 @@ cmd_check() {
   local ok=1 x out
   echo "Stagehand $STAGEHAND_VERSION  config: $CFG"
   echo "ENABLED=$ENABLED DRY_RUN=$DRY_RUN SWITCH_MODE=$SWITCH_MODE POOL=$POOL"
-  for x in gdb rsync python3 docker; do command -v "$x" >/dev/null && echo "ok   $x found" || { echo "FAIL $x missing"; ok=0; }; done
+  for x in gdb rsync php docker; do command -v "$x" >/dev/null && echo "ok   $x found" || { echo "FAIL $x missing"; ok=0; }; done
   [ -d "/mnt/$POOL" ] && echo "ok   pool /mnt/$POOL mounted" || { echo "FAIL pool /mnt/$POOL missing"; ok=0; }
   for x in $SHARES; do
     if out=$(share_pool_ok "$x"); then echo "ok   share $x uses $POOL (pool first, array second)"; else echo "WARN share $x: $out"; fi
@@ -716,12 +675,59 @@ cmd_status() {
   done < "$ORPHANS"
 }
 
+########## plugin helpers ##########
+CRON_FILE="/boot/config/plugins/stagehand/stagehand.cron"
+
+cmd_apply() {
+  local me="$SCRIPT_DIR/stagehand.sh"
+  if [ "$SCHEDULE" = "yes" ] && [ "$ENABLED" = "yes" ]; then
+    mkdir -p "$(dirname "$CRON_FILE")"
+    {
+      echo "# Stagehand schedule (generated from stagehand.cfg; edit on the plugin page)"
+      echo "$RUN_CRON bash $me run >/dev/null 2>&1"
+      echo "$CLEAN_CRON bash $me clean >/dev/null 2>&1"
+    } > "$CRON_FILE"
+    echo "schedule on: run '$RUN_CRON', clean '$CLEAN_CRON'"
+  else
+    rm -f "$CRON_FILE"
+    echo "schedule off"
+  fi
+  [ -x /usr/local/sbin/update_cron ] && /usr/local/sbin/update_cron
+  return 0
+}
+
+cmd_enable_mover_ignore() {
+  local f="$MOVER_TUNING_CFG" bak
+  [ -f "$f" ] || { echo "Mover Tuning config not found: $f"; return 1; }
+  bak="$f.stagehand-bak-$(date +%Y%m%d-%H%M%S)"
+  cp -p "$f" "$bak" || { echo "backup failed"; return 1; }
+  touch "$MOVER_IGNORE_FILE" 2>/dev/null
+  local tmp="$f.stagehand.$$"
+  tr -d '\r' < "$f" | grep -vE '^(filelistf|filelistv)=' > "$tmp"
+  printf 'filelistf="yes"\nfilelistv="%s"\n' "$MOVER_IGNORE_FILE" >> "$tmp"
+  mv -f "$tmp" "$f"
+  echo "Mover Tuning now ignores files listed in $MOVER_IGNORE_FILE (backup: $bak)"
+}
+
+cmd_uninstall_cleanup() {
+  local f="$MOVER_IGNORE_FILE" tmp
+  [ -f "$f" ] || return 0
+  tmp="$f.stagehand.$$"
+  awk -v b="$MARK_BEGIN" -v e="$MARK_END" '$0==b{skip=1; next} $0==e{skip=0; next} !skip' "$f" > "$tmp" && mv -f "$tmp" "$f"
+  echo "removed Stagehand entries from $f"
+}
+
 ########## main ##########
 case "$CMD" in
   check) cmd_check; exit 0 ;;
+  apply) cmd_apply; exit 0 ;;
+  enable-mover-ignore) cmd_enable_mover_ignore; exit $? ;;
+  uninstall-cleanup) cmd_uninstall_cleanup; exit 0 ;;
+  pause) mkdir -p "$(dirname "$KILL_FILE")" && touch "$KILL_FILE" && echo "paused: all runs stop until resumed"; exit 0 ;;
+  resume) rm -f "$KILL_FILE" && echo "resumed"; exit 0 ;;
   explain) cmd_explain; exit 0 ;;
   run|clean|status) ;;
-  *) echo "usage: $0 [run|clean|check|explain|status] [-c cfg]" >&2; exit 2 ;;
+  *) echo "usage: $0 [run|clean|check|explain|status|apply|enable-mover-ignore|uninstall-cleanup] [-c cfg]" >&2; exit 2 ;;
 esac
 
 state_init || { echo "cannot create state dir $STATE_DIR" >&2; exit 1; }

@@ -52,6 +52,7 @@ $sections = [
   'Keep and release' => [
     ['KEEP_HOURS', 'Keep for (hours)', 'text', 'How long an SSD copy is kept after it was last played. Copies that were never played (next episodes) count from when they were copied.'],
     ['KEEP_RULES', 'Keep rules per folder', 'text', 'Different keep times for some folders, as folder:hours separated by spaces. First match wins. Example: tv_main:144 movies_main:24'],
+    ['ARRAY_WAKE_HOURS', 'Touch array disks only at (hours)', 'text', 'any = whenever clean runs. Or hours like 4 (or 4 16): releasing expired copies and checking leftover files only happens then, so Stagehand never wakes a sleeping disk on its own. Choose the hour your mover runs. Expired copies stay on the SSD until then. Release all now ignores this.'],
     ['RELEASE_VERIFY', 'Before deleting an SSD copy', ['size', 'cmp'], 'How to prove the array still has the file. size = same name and size (fast). cmp = compare every byte (slow, reads the whole file from the array).'],
     ['CLEAN_EMPTY_DIRS', 'Remove empty folders', 'yesno', 'After releasing a copy, delete SSD folders it leaves empty. Only on the pool; array folders are never touched.'],
   ],

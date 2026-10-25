@@ -16,6 +16,13 @@ When someone starts watching a title that lives on a spinning array disk, Stageh
 6. **More episodes.** `NEXT_EPISODES` copies the next N episodes, every later episode (`rest`) or the whole season folder (`season`), up to `MAX_COPY_GB_PER_RUN` per run, so the array disk can stay asleep for the rest of the season.
 7. **Release.** `clean` deletes a pool copy only when its keep time has passed, an array copy with the same name and size exists (or byte-identical with `RELEASE_VERIFY="cmp"`), and nothing has it open.
 
+## Keeping array disks asleep
+
+- A title that already plays from the SSD never touches the array: Stagehand compares against the size it recorded at copy time and finds open array handles in `/proc`.
+- Next episodes are topped up only when nothing later of that season is on the SSD yet, and at most once per 6 hours per title. With `NEXT_EPISODES="3"` that means about one short disk wake-up every three episodes; `season` means one per season.
+- `ARRAY_WAKE_HOURS` (for example `"4"`, the hour the mover runs) limits releasing expired copies and checking leftover files to those hours. Expired copies stay on the SSD until then. **Release all now** ignores it.
+- Disk wake-ups from other tools (library scans in Plex, Sonarr/Radarr refreshes, Tdarr, Bazarr) are outside Stagehand; the Dynamix Cache Directories plugin keeps folder listings in RAM for those.
+
 ## Safety rules
 
 - Never writes to, moves or deletes anything on array disks.

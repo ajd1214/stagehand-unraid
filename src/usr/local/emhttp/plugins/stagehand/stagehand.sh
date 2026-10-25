@@ -27,7 +27,7 @@ done
 [ -z "$LC_ALL" ] && export LANG=C LC_ALL=C
 unset _l
 
-STAGEHAND_VERSION="2026.10.24d"
+STAGEHAND_VERSION="2026.10.24e"
 CMD="${1:-run}"; shift || true
 CFG=""
 while [ $# -gt 0 ]; do
@@ -56,6 +56,7 @@ source <(tr -d '\r' < "$CFG")
 : "${IO_ERROR_WINDOW_MIN:=${HEALTH_IO_ERROR_WINDOW_MIN:-60}}" "${CLEAN_EMPTY_DIRS:=yes}"
 # Older configs: HEALTH_CHECK="no" turned off all error checks.
 [ "${HEALTH_CHECK:-yes}" = "no" ] && SKIP_ON_FS_ERRORS=no && SKIP_ON_IO_ERRORS=no
+: "${ARRAY_WAKE_HOURS:=any}"
 : "${MAX_COPY_GB_PER_RUN:=60}" "${COPY_BWLIMIT_KBPS:=0}"
 : "${MEDIASERVER_TYPE:=plex}" "${MEDIASERVER_URL:=http://127.0.0.1:32400}" "${MEDIASERVER_TOKEN:=auto}"
 : "${MEDIASERVER_CONTAINER:=plex}" "${PATH_MAP:=auto}" "${MANAGE_MOVER_IGNORE:=no}"
@@ -74,6 +75,7 @@ ITEMS="$STATE_DIR/items.tsv"     # pool_path  share  rel  size  copied_epoch  la
 ORPHANS="$STATE_DIR/orphans.tsv" # array_path  share  rel  size  array_mtime  detected_epoch  status
 WARNED="$STATE_DIR/warned.tsv"   # key  epoch  (rate-limits repeating warnings)
 SEEN="$STATE_DIR/seen.tsv"       # share/rel  first_seen  last_seen
+NEXTCHK="$STATE_DIR/nextcheck.tsv" # share/rel  epoch  (next-episode check done for a cached title)
 LOCK="$STATE_DIR/stagehand.lock"
 NOW=$(date +%s)
 DRY=0; [ "$DRY_RUN" = "yes" ] && DRY=1
@@ -123,6 +125,13 @@ array_copy() {
 }
 
 pool_path() { echo "/mnt/$POOL/$1/$2"; }
+
+# True when clean may touch array disks now (releases, leftover checks). ARRAY_WAKE_HOURS="any"
+# or a list of hours (0-23) such as "4" to keep array access to the hour the mover runs anyway.
+array_hour_ok() {
+  [ "$ARRAY_WAKE_HOURS" = "any" ] || [ -z "$ARRAY_WAKE_HOURS" ] && return 0
+  in_list "$((10#$(date +%H)))" $ARRAY_WAKE_HOURS
+}
 
 passes_filters() {
   local rel="$1" ok=0 x ext
@@ -326,7 +335,24 @@ share_pool_ok() {
 }
 
 ########## state ##########
-state_init() { mkdir -p "$STATE_DIR" && touch "$ITEMS" "$SEEN" "$ORPHANS" "$WARNED"; }
+state_init() { mkdir -p "$STATE_DIR" && touch "$ITEMS" "$SEEN" "$ORPHANS" "$WARNED" "$NEXTCHK"; }
+
+# Next-episode check for a playing title that is already on the pool: done at most once per
+# 6 hours, and skipped while the pool already holds a later file of that folder. Keeps a title
+# that plays from the SSD from listing array folders every minute.
+next_checked() { local t; t=$(awk -F'\t' -v k="$1" '$1==k{print $2; exit}' "$NEXTCHK" 2>/dev/null); [ -n "$t" ] && [ $((NOW - t)) -lt 21600 ]; }
+next_mark() {
+  local tmp="$NEXTCHK.tmp.$$"
+  { awk -F'\t' -v k="$1" -v n="$NOW" '$1!=k && n-$2 < 86400' "$NEXTCHK"; printf '%s\t%s\n' "$1" "$NOW"; } > "$tmp" && mv -f "$tmp" "$NEXTCHK"
+}
+pool_has_later() {  # share rel : a later file of the same folder is already on the pool
+  local share="$1" rel="$2" dir base f
+  dir=$(dirname "$rel"); base=$(basename "$rel")
+  while IFS= read -r f; do
+    [ -n "$f" ] && passes_filters "$dir/$f" && return 0
+  done < <(ls -1 "/mnt/$POOL/$share/$dir" 2>/dev/null | LC_ALL=C sort | awk -v b="$base" 'f{print} $0==b{f=1}')
+  return 1
+}
 
 warn_once() {  # key message : log a WARN at most once per 24 hours per key
   local key="$1"; shift
@@ -496,28 +522,31 @@ handle_title() {  # state flag host_path
     return
   fi
   dst=$(pool_path "$share" "$rel")
-  arr=$(array_copy "$share" "$rel")
-
-  if [ -z "$arr" ]; then
-    # Not on the array: either only on the pool already, or unknown location. Nothing to do.
-    [ -n "$(item_get "$dst")" ] && [ $DRY -eq 0 ] && item_touch "$dst"
-    return
-  fi
-
-  why=$(share_pool_ok "$share") || { warn_once "pool:$share" "skipping share $share: $why"; return; }
-  # Several versions of this title and Plex did not say which is playing: only act on the one being read.
-  if [ "$flag" = "guess" ] && [ ! -f "$dst" ] && [ -z "$(shfs_fds_for "$arr")" ]; then return; fi
 
   if [ -f "$dst" ]; then
-    # Already cached. Keep it alive and retry the switch if playback is still on the array.
-    if [ "$(stat -c %s "$dst")" = "$(stat -c %s "$arr")" ]; then
-      [ -n "$(item_get "$dst")" ] && [ $DRY -eq 0 ] && item_touch "$dst"
-      switch_playback "$arr" "$dst" "$rel" 1
-      # Keep filling the season/next episodes on later runs (MAX_COPY_GB_PER_RUN per run).
-      pool_healthy >/dev/null && copy_next_episodes "$share" "$rel"
+    # Already on the pool. Never touch the array here: compare with the size recorded at copy
+    # time, switch any shfs handle still on an array disk (found in /proc, no disk access) and
+    # top up next episodes only when nothing later is cached yet.
+    local item rec
+    item=$(item_get "$dst")
+    [ -n "$item" ] || return      # not Stagehand's copy (for example a new download): nothing to do
+    rec=$(cut -f4 <<< "$item")
+    [ "$(stat -c %s "$dst")" = "$rec" ] || return   # pool copy changed (upgrade/re-encode): clean decides
+    [ $DRY -eq 0 ] && item_touch "$dst"
+    local r; while IFS= read -r r; do switch_playback "$r/$share/$rel" "$dst" "$rel" 1; done < <(source_roots)
+    if ! next_checked "$share/$rel"; then
+      if pool_has_later "$share" "$rel"; then next_mark "$share/$rel"
+      elif pool_healthy >/dev/null; then copy_next_episodes "$share" "$rel"; [ $? -eq 2 ] || next_mark "$share/$rel"; fi
     fi
     return
   fi
+
+  arr=$(array_copy "$share" "$rel")
+  [ -n "$arr" ] || return        # neither on the pool nor on an array disk
+
+  why=$(share_pool_ok "$share") || { warn_once "pool:$share" "skipping share $share: $why"; return; }
+  # Several versions of this title and Plex did not say which is playing: only act on the one being read.
+  if [ "$flag" = "guess" ] && [ -z "$(shfs_fds_for "$arr")" ]; then return; fi
 
   first=$(seen_first "$share/$rel")
   if [ $((NOW - first)) -lt "$WAIT_SECONDS" ]; then
@@ -538,7 +567,7 @@ handle_title() {  # state flag host_path
     switch_playback "$arr" "$dst" "$rel"
   fi
   copy_sidecars "$share" "$rel"
-  copy_next_episodes "$share" "$rel"
+  copy_next_episodes "$share" "$rel"; [ $? -eq 2 ] || next_mark "$share/$rel"
 }
 
 copy_sidecars() {  # share rel : subtitle files named like the video (Show.S01E01.en.srt)
@@ -569,7 +598,7 @@ copy_next_episodes() {  # share rel
   # NEXT_EPISODES: a number = that many following episodes; "rest" = every later episode in the
   # folder; "season" = the whole folder (earlier episodes too). Limited to MAX_COPY_GB_PER_RUN per
   # run; the remainder is copied on the next runs while the title is still playing.
-  local share="$1" rel="$2" dir base n=0 limit f arr dst size budget listing
+  local share="$1" rel="$2" dir base n=0 limit f arr dst size budget listing rc=0
   case "$NEXT_EPISODES" in
     rest|season) limit=999999 ;;
     *) [ "$NEXT_EPISODES" -gt 0 ] 2>/dev/null || return 0; limit=$NEXT_EPISODES ;;
@@ -591,12 +620,13 @@ copy_next_episodes() {  # share rel
     [ -f "$dst" ] && continue
     arr=$(array_copy "$share" "$dir/$f") || continue
     size=$(stat -c %s "$arr")
-    [ "$size" -le "$budget" ] || break
-    pool_has_room "$size" || { warn_once "room:$share/$dir" "not enough free space to copy more of: $dir"; break; }
+    [ "$size" -le "$budget" ] || { rc=2; break; }
+    pool_has_room "$size" || { warn_once "room:$share/$dir" "not enough free space to copy more of: $dir"; break; }   # not retried every minute
     budget=$((budget - size))
     if [ $DRY -eq 1 ]; then log COPY "would copy episode $(( size / 1048576 )) MB: $dir/$f"
     else copy_to_pool "$arr" "$dst" "$share" "$dir/$f" && item_upsert "$dst" "$share" "$dir/$f" "$size" "$NOW" "$NOW" "next" "$(stat -c %Y "$arr")" && copy_sidecars "$share" "$dir/$f"; fi
   done <<< "$listing"
+  return $rc
 }
 
 ########## orphans ##########
@@ -609,6 +639,7 @@ check_orphans() {
   while IFS=$'\t' read -r pool share rel size copied last reason amt; do
     [ -z "$pool" ] && continue
     [ -f "$pool" ] && continue
+    array_hour_ok || continue      # look at the array later, in ARRAY_WAKE_HOURS
     arr=$(array_copy "$share" "$rel")
     if [ -z "$arr" ]; then
       log INFO "removed from pool and array, nothing left behind: $rel"
@@ -764,15 +795,17 @@ remove_empty_dirs() {  # share reldir : rmdir upward while empty, stop at the sh
 
 cmd_clean() {  # [all] : "all" ignores keep time (release-all)
   local all="${1:-}" opens pool share rel size copied last reason hrs arr kept=0 rel_n=0 busy=0 mover=0
-  local why="expired"
+  local why="expired" wake=0 waiting=0
   [ "$all" = "all" ] && { why="release-all"; log INFO "release-all: releasing every pool copy now, ignoring keep time"; }
-  check_orphans
+  { [ "$all" = "all" ] || array_hour_ok; } && wake=1
+  [ $wake -eq 1 ] && check_orphans
   opens=$(open_targets)
   while IFS=$'\t' read -r pool share rel size copied last reason _; do
     [ -z "$pool" ] && continue
     [ -f "$pool" ] || continue   # handled by check_orphans
     hrs=$(keep_hours_for "$rel")
     if [ "$all" != "all" ] && [ $((NOW - last)) -lt $((hrs * 3600)) ]; then kept=$((kept + 1)); continue; fi
+    [ $wake -eq 1 ] || { waiting=$((waiting + 1)); continue; }   # expired: released in ARRAY_WAKE_HOURS
     arr=$(array_copy "$share" "$rel")
     if [ -z "$arr" ]; then
       log WARN "$why but no array copy, keeping file and releasing it to the mover: $rel"
@@ -794,12 +827,12 @@ cmd_clean() {  # [all] : "all" ignores keep time (release-all)
       item_drop "$pool"
     fi
   done < <(cat "$ITEMS")
-  process_orphans
+  [ $wake -eq 1 ] && process_orphans
   if [ "$all" = "all" ]; then
     log INFO "release-all done: released=$rel_n in-use=$busy left-for-mover=$mover"
     echo "release-all done: released=$rel_n in-use (retry later)=$busy left on the pool for the mover=$mover"
   else
-    log INFO "clean done: released=$rel_n still-in-keep-window=$kept"
+    log INFO "clean done: released=$rel_n still-in-keep-window=$kept$( [ $waiting -gt 0 ] && echo " expired-waiting-for-array-hours($ARRAY_WAKE_HOURS)=$waiting")"
   fi
   update_mover_ignore
 }

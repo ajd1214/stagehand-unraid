@@ -1,0 +1,17 @@
+Menu="Stagehand:2"
+Title="Lists"
+Tag="icon-disk"
+Markdown="false"
+---
+<?php
+$sh = "/usr/local/emhttp/plugins/stagehand/stagehand.sh";
+$status = shell_exec("bash $sh status 2>&1");
+$check  = isset($_GET['check']) ? shell_exec("bash $sh check 2>&1") : null;
+?>
+<div class="title"><span class="left"><i class="fa fa-database title"></i>Cached copies and leftover files <span style="opacity:.6;font-size:.9em">(leftover array files are only reported; Stagehand never deletes array files)</span></span>
+<span class="right"><input type="button" value="Refresh" onclick="location.reload()"></span></div>
+<pre style="white-space:pre-wrap;font-family:monospace;font-size:12px"><?=htmlspecialchars($status ?: '(nothing tracked)')?></pre>
+
+<div class="title"><span class="left"><i class="fa fa-stethoscope title"></i>Self-check</span>
+<span class="right"><input type="button" value="Run check" onclick="location.search='check=1'"></span></div>
+<pre style="white-space:pre-wrap;font-family:monospace;font-size:12px"><?=htmlspecialchars($check ?? 'Press "Run check" to validate settings, tools, pool, shares, path map and media server. Changes nothing.')?></pre>

@@ -1,0 +1,215 @@
+Menu="Utilities"
+Type="xmenu"
+Title="Stagehand"
+Icon="stagehand.png"
+Tag="icon-disk"
+Tabs="true"
+Markdown="false"
+---
+<?php
+// Stagehand settings page. Saves through Unraid's /update.php, then runs "stagehand.sh apply"
+// so the schedule matches the saved settings.
+$plugin  = "/usr/local/emhttp/plugins/stagehand";
+$cfgfile = "/boot/config/plugins/stagehand/stagehand.cfg";
+
+function sh_read_cfg($file) {
+  $out = [];
+  if (!is_file($file)) return $out;
+  foreach (file($file, FILE_IGNORE_NEW_LINES) as $line) {
+    $line = rtrim($line, "\r");
+    if (preg_match('/^([A-Z_][A-Z0-9_]*)="(.*)"\s*$/', $line, $m)) $out[$m[1]] = $m[2];
+  }
+  return $out;
+}
+$cfg = array_merge(sh_read_cfg("$plugin/default.cfg"), sh_read_cfg($cfgfile));
+function v($k) { global $cfg; return htmlspecialchars($cfg[$k] ?? '', ENT_QUOTES); }
+
+// [key, label, type, help]  type: text | password | yesno | list of options
+// The default for every field is read from default.cfg and shown next to it.
+$sections = [
+  'Master controls' => [
+    ['ENABLED', 'Enable Stagehand', 'yesno', 'Master on/off switch. No = every run stops immediately, even if the schedule is on. Turning it off never interrupts anyone watching.'],
+    ['DRY_RUN', 'Dry run', 'yesno', 'Yes = practice mode: Stagehand only writes what it would do to the Log tab. Nothing is copied, switched or deleted. Leave on until the Log tab looks right, then set to No.'],
+    ['SCHEDULE', 'Run on a schedule', 'yesno', 'Yes = run automatically using the two schedules below. No = only runs when started by hand.'],
+    ['RUN_CRON', 'Copy/switch schedule', 'text', 'How often to look for playing titles (cron format). Every minute (* * * * *) means a title is moved to the SSD about 1-2 minutes after it starts.'],
+    ['CLEAN_CRON', 'Release schedule', 'text', 'How often to delete expired SSD copies (cron format). Once an hour (17 * * * *) is plenty.'],
+  ],
+  'What to cache' => [
+    ['POOL', 'Target pool', 'text', 'The SSD pool to copy to, as named under /mnt (for example cache). It must be the primary storage of every share below.'],
+    ['SHARES', 'Shares', 'text', 'The user shares that hold your media, separated by spaces. Example: tv movies, or just media.'],
+    ['SUBFOLDERS', 'Media folders', 'text', 'Only cache files inside folders with these names (anywhere in the path), separated by spaces. Example: tv movies. Keeps downloads and other folders out.'],
+    ['EXCLUSIONS', 'Never cache', 'text', 'Skip any file whose path contains one of these words, separated by spaces. Example: .Recycle.Bin samples'],
+    ['FILETYPES', 'Video file types', 'text', 'Extensions that count as video, without dots, separated by spaces.'],
+    ['WAIT_SECONDS', 'Wait before copying (seconds)', 'text', 'A title must keep playing this long before it is copied. Stops copies when someone only previews or skips through.'],
+    ['NEXT_EPISODES', 'Also copy', 'text', 'What else to copy when an episode plays. 0 = only the playing file. A number (1, 2, 3) = that many following episodes. rest = every later episode in the season. season = the whole season folder. More copied = fewer disk spin-ups, more SSD space and wear.'],
+    ['COPY_SIDECARS', 'Copy subtitles', 'yesno', 'Also copy subtitle files named like the video (Show.S01E01.en.srt), so the disk is not spun up just to read subtitles.'],
+    ['SIDECAR_TYPES', 'Subtitle file types', 'text', 'Extensions that count as subtitles, without dots, separated by spaces.'],
+  ],
+  'Live switch' => [
+    ['SWITCH_MODE', 'Switch mode', ['switch', 'close', 'none'], 'switch = move the running playback to the SSD copy with no interruption (recommended). close = cut the array file; the player stalls and resumes from the SSD. none = only copy; the SSD is used the next time the title is opened.'],
+    ['GDB_TIMEOUT_SECONDS', 'Switch time limit (seconds)', 'text', 'Give up on a live switch that takes longer than this. Switches normally take well under one second.'],
+  ],
+  'Keep and release' => [
+    ['KEEP_HOURS', 'Keep for (hours)', 'text', 'How long an SSD copy is kept after it was last played. Copies that were never played (next episodes) count from when they were copied.'],
+    ['KEEP_RULES', 'Keep rules per folder', 'text', 'Different keep times for some folders, as folder:hours separated by spaces. First match wins. Example: tv:144 movies:24'],
+    ['ARRAY_WAKE_HOURS', 'Touch array disks only at (hours)', 'text', 'any = whenever clean runs. Or hours like 4 (or 4 16): releasing expired copies and checking leftover files only happens then, so Stagehand never wakes a sleeping disk on its own. Choose the hour your mover runs. Expired copies stay on the SSD until then. Release all now ignores this.'],
+    ['RELEASE_VERIFY', 'Before deleting an SSD copy', ['size', 'cmp'], 'How to prove the array still has the file. size = same name and size (fast). cmp = compare every byte (slow, reads the whole file from the array).'],
+    ['CLEAN_EMPTY_DIRS', 'Remove empty folders', 'yesno', 'After releasing a copy, delete SSD folders it leaves empty. Only on the pool; array folders are never touched.'],
+  ],
+  'Pool safety' => [
+    ['MIN_FREE_GB', 'Keep free on the pool (GB)', 'text', 'Never copy if the pool would end up with less free space than this.'],
+    ['SKIP_ON_FS_ERRORS', 'Pause copying on new filesystem errors', 'yesno', 'Stop copying for a while when the pool reports NEW btrfs/zfs errors. Old errors from the past are ignored. A read-only pool always stops copying, whatever this says.'],
+    ['SKIP_ON_IO_ERRORS', 'Pause copying on disk I/O errors', 'yesno', 'Stop copying for a while when the kernel logs I/O errors for a pool drive (for example a bad cable). Turn off if old SSDs log occasional errors you have decided to live with.'],
+    ['IO_ERROR_WINDOW_MIN', 'Pause length (minutes)', 'text', 'How long copying stays paused after one of the errors above.'],
+    ['MAX_COPY_GB_PER_RUN', 'Extra episodes per run (GB)', 'text', 'Limit for the extra episodes copied in one run (the playing file is always copied). With rest or season, the remainder follows in the next runs while the title is still playing.'],
+    ['COPY_BWLIMIT_KBPS', 'Copy speed limit (KB/s)', 'text', '0 = full speed. Set a limit if copies slow down other things on the server.'],
+  ],
+  'Media server 1' => [
+    ['MEDIASERVER_TYPE', 'Type', ['plex', 'jellyfin', 'emby'], 'Jellyfin and Emby support is new and less tested.'],
+    ['MEDIASERVER_URL', 'Address', 'text', 'How Stagehand reaches the server from Unraid. Plex in Docker on host networking: http://127.0.0.1:32400. Jellyfin/Emby default port: 8096.'],
+    ['MEDIASERVER_TOKEN', 'Token / API key', 'password', 'Plex: auto reads it from the Plex container. Jellyfin/Emby: create an API key in the server dashboard and paste it here.'],
+    ['MEDIASERVER_CONTAINER', 'Docker container name', 'text', 'The server container as named on the Docker tab. Used to read its folder mappings and the Plex token.'],
+    ['PATH_MAP', 'Path map', 'text', 'auto = translate the server folders using the container mappings. Only change for a server outside Docker or on another machine: server_path=&gt;host_path; separated by ;'],
+  ],
+  'Media server 2 (optional)' => [
+    ['MEDIASERVER2_TYPE', 'Type', ['none', 'plex', 'jellyfin', 'emby'], 'A second server, for example Jellyfin next to Plex. none = off.'],
+    ['MEDIASERVER2_URL', 'Address', 'text', 'How Stagehand reaches this server from Unraid, for example http://127.0.0.1:8096 for Jellyfin or Emby.'],
+    ['MEDIASERVER2_TOKEN', 'Token / API key', 'password', 'Plex: auto. Jellyfin/Emby: API key.'],
+    ['MEDIASERVER2_CONTAINER', 'Docker container name', 'text', 'The server container as named on the Docker tab. Used to read its folder mappings (and the token for Plex).'],
+    ['PATH_MAP2', 'Path map', 'text', 'auto, or server_path=&gt;host_path; ...'],
+  ],
+  'Media server 3 (optional)' => [
+    ['MEDIASERVER3_TYPE', 'Type', ['none', 'plex', 'jellyfin', 'emby'], 'A third server. none = off.'],
+    ['MEDIASERVER3_URL', 'Address', 'text', 'How Stagehand reaches this server from Unraid, for example http://127.0.0.1:8096 for Jellyfin or Emby.'],
+    ['MEDIASERVER3_TOKEN', 'Token / API key', 'password', 'Plex: auto. Jellyfin/Emby: API key.'],
+    ['MEDIASERVER3_CONTAINER', 'Docker container name', 'text', 'The server container as named on the Docker tab. Used to read its folder mappings (and the token for Plex).'],
+    ['PATH_MAP3', 'Path map', 'text', 'auto, or server_path=&gt;host_path; ...'],
+  ],
+  'Leftover array files' => [
+    ['ORPHAN_ACTION', 'Leftover array files', ['report', 'delete'], 'When Sonarr, Radarr, Maintainerr or you delete, upgrade or rename a title while it is on the SSD, Unraid removes only the SSD copy and the OLD file on the array shows up again in Plex. Stagehand asks Sonarr/Radarr whether they still track that file. report = list confirmed leftovers on the Lists tab, delete nothing. <b>delete = also DELETE confirmed leftovers from the array.</b> <b style=\'color:#e22\'>Danger:</b> this deletes media files from your array, and nothing can bring them back. It only deletes when Sonarr/Radarr say they no longer track the file, Mover Tuning\'s ignore list is on, the file is unchanged since it was cached, nothing is playing it and the wait below has passed. Files that no Sonarr/Radarr manages are never deleted. Use report for a while first and check what it lists.'],
+    ['ORPHAN_GRACE_MIN', 'Wait before deleting (minutes)', 'text', 'Time between finding a leftover and deleting it, so Sonarr/Radarr can finish what they were doing.'],
+  ],
+  'Sonarr / Radarr 1' => [
+    ['ARR1_TYPE', 'Type', ['none', 'sonarr', 'radarr'], 'Each Sonarr or Radarr you run, one per slot (for example three Sonarr and one Radarr). Only used to tell real files from leftovers. none = slot unused.'],
+    ['ARR1_URL', 'Address', 'text', 'How Stagehand reaches it from Unraid, for example http://127.0.0.1:8989 (Sonarr) or http://127.0.0.1:7878 (Radarr).'],
+    ['ARR1_KEY', 'API key', 'password', 'auto = read it from the container (config.xml). Or paste it from Settings &gt; General in Sonarr/Radarr.'],
+    ['ARR1_CONTAINER', 'Docker container name', 'text', 'As named on the Docker tab. Used to translate its folders to Unraid paths, and for the auto API key.'],
+  ],
+  'Sonarr / Radarr 2' => [
+    ['ARR2_TYPE', 'Type', ['none', 'sonarr', 'radarr'], 'none = slot unused.'],
+    ['ARR2_URL', 'Address', 'text', 'How Stagehand reaches it from Unraid, for example http://127.0.0.1:8989 (Sonarr) or http://127.0.0.1:7878 (Radarr).'],
+    ['ARR2_KEY', 'API key', 'password', 'auto = read it from the container (config.xml). Or paste it from Settings &gt; General in Sonarr/Radarr.'],
+    ['ARR2_CONTAINER', 'Docker container name', 'text', 'As named on the Docker tab. Used to translate its folders to Unraid paths, and for the auto API key.'],
+  ],
+  'Sonarr / Radarr 3' => [
+    ['ARR3_TYPE', 'Type', ['none', 'sonarr', 'radarr'], 'none = slot unused.'],
+    ['ARR3_URL', 'Address', 'text', 'How Stagehand reaches it from Unraid, for example http://127.0.0.1:8989 (Sonarr) or http://127.0.0.1:7878 (Radarr).'],
+    ['ARR3_KEY', 'API key', 'password', 'auto = read it from the container (config.xml). Or paste it from Settings &gt; General in Sonarr/Radarr.'],
+    ['ARR3_CONTAINER', 'Docker container name', 'text', 'As named on the Docker tab. Used to translate its folders to Unraid paths, and for the auto API key.'],
+  ],
+  'Sonarr / Radarr 4' => [
+    ['ARR4_TYPE', 'Type', ['none', 'sonarr', 'radarr'], 'none = slot unused.'],
+    ['ARR4_URL', 'Address', 'text', 'How Stagehand reaches it from Unraid, for example http://127.0.0.1:8989 (Sonarr) or http://127.0.0.1:7878 (Radarr).'],
+    ['ARR4_KEY', 'API key', 'password', 'auto = read it from the container (config.xml). Or paste it from Settings &gt; General in Sonarr/Radarr.'],
+    ['ARR4_CONTAINER', 'Docker container name', 'text', 'As named on the Docker tab. Used to translate its folders to Unraid paths, and for the auto API key.'],
+  ],
+  'Sonarr / Radarr 5' => [
+    ['ARR5_TYPE', 'Type', ['none', 'sonarr', 'radarr'], 'none = slot unused.'],
+    ['ARR5_URL', 'Address', 'text', 'How Stagehand reaches it from Unraid, for example http://127.0.0.1:8989 (Sonarr) or http://127.0.0.1:7878 (Radarr).'],
+    ['ARR5_KEY', 'API key', 'password', 'auto = read it from the container (config.xml). Or paste it from Settings &gt; General in Sonarr/Radarr.'],
+    ['ARR5_CONTAINER', 'Docker container name', 'text', 'As named on the Docker tab. Used to translate its folders to Unraid paths, and for the auto API key.'],
+  ],
+  'Sonarr / Radarr 6' => [
+    ['ARR6_TYPE', 'Type', ['none', 'sonarr', 'radarr'], 'none = slot unused.'],
+    ['ARR6_URL', 'Address', 'text', 'How Stagehand reaches it from Unraid, for example http://127.0.0.1:8989 (Sonarr) or http://127.0.0.1:7878 (Radarr).'],
+    ['ARR6_KEY', 'API key', 'password', 'auto = read it from the container (config.xml). Or paste it from Settings &gt; General in Sonarr/Radarr.'],
+    ['ARR6_CONTAINER', 'Docker container name', 'text', 'As named on the Docker tab. Used to translate its folders to Unraid paths, and for the auto API key.'],
+  ],
+  'Mover Tuning' => [
+    ['MANAGE_MOVER_IGNORE', 'Protect SSD copies from the mover', 'yesno', 'Lists every SSD copy in the Mover Tuning ignore file so the mover leaves it alone until Stagehand releases it. Your own lines in that file are never changed. Needs the Mover Tuning option shown in Status to be on.'],
+    ['MOVER_IGNORE_FILE', 'Ignore file', 'text', 'Must be the same path as "File list path" in Settings &gt; Scheduler &gt; Mover Tuning.'],
+    ['MOVER_TUNING_CFG', 'Mover Tuning settings file', 'text', 'Only change if Mover Tuning keeps its settings somewhere else.'],
+  ],
+  'Logging' => [
+    ['STATE_DIR', 'State folder', 'text', 'Where Stagehand keeps its records. Keep this off the USB flash drive.'],
+    ['LOG_FILE', 'Log file', 'text', 'Shown on the Log tab.'],
+    ['LOG_MAX_MB', 'Log size limit (MB)', 'text', 'The log is rotated when it reaches this size.'],
+    ['SYSLOG', 'Also write to the Unraid system log', 'yesno', 'Copy every Stagehand log line into the Unraid system log (Tools &gt; System Log, diagnostics and any syslog server), tagged stagehand. Handy for lining up Stagehand events with other server events. No = Log tab only.'],
+    ['NOTIFY', 'Unraid notifications', ['none', 'errors', 'all'], 'errors = problems and leftover files. all = also every live switch.'],
+  ],
+  'Advanced' => [
+    ['SOURCE_ROOTS', 'Where originals live', 'text', 'auto = the array disks (/mnt/disk1, /mnt/disk2 ...). Only change for unusual setups: space-separated folders.'],
+    ['ALLOW_OTHER_POOL', 'Allow a pool the share does not use', 'yesno', 'Experimental. Unraid may keep reading the original instead of the copy after playback restarts.'],
+    ['NEXT_EPISODE_REGEX', 'Episode name pattern', 'text', 'How an episode is recognised in a file name. The default matches S01E02. Season folders in several languages are recognised too.'],
+    ['KILL_FILE', 'Pause file', 'text', 'While this file exists every run stops. Pause now / Resume create and remove it.'],
+  ],
+];
+$defaults = sh_read_cfg("$plugin/default.cfg");
+
+$paused   = is_file($cfg['KILL_FILE'] ?? '');
+$cronon   = is_file("/boot/config/plugins/stagehand/stagehand.cron");
+$mtcfg    = $cfg['MOVER_TUNING_CFG'] ?? '';
+$mtlist   = is_file($mtcfg) && preg_match('/^filelistf="yes"/m', str_replace("\r", "", file_get_contents($mtcfg)));
+$gdbok    = trim(shell_exec('command -v gdb 2>/dev/null')) !== '';
+function badge($ok, $yes, $no) { return $ok ? "<span style='color:#3c3'>$yes</span>" : "<span style='color:#e22'>$no</span>"; }
+?>
+
+<div class="title"><span class="left"><i class="fa fa-film title"></i>Status</span></div>
+<dl><dt>Stagehand:</dt><dd><span style="white-space:nowrap"><?=badge(($cfg['ENABLED'] ?? '') === 'yes' && !$paused, 'enabled', $paused ? 'paused (kill file present)' : 'disabled')?>, <?=($cfg['DRY_RUN'] ?? 'yes') === 'yes' ? "<span style='color:#e90'>dry run (nothing is copied)</span>" : "<span style='color:#3c3'>live</span>"?></span></dd></dl>
+<dl><dt>Schedule:</dt><dd><?=badge($cronon, 'on', 'off')?></dd></dl>
+<dl><dt>Mover Tuning ignore list:</dt><dd><?=badge($mtlist, 'on', 'off: cached copies are not protected from the mover')?></dd></dl>
+<dl><dt>gdb (needed for live switch):</dt><dd><?=badge($gdbok, 'installed', 'missing')?></dd></dl>
+
+<form method="POST" action="/update.php" target="progressFrame" style="display:inline">
+<input type="hidden" name="#command" value="<?=$plugin?>/stagehand.sh">
+<?php if ($paused):?>
+<input type="hidden" name="#arg[1]" value="resume"><input type="submit" value="Resume">
+<?php else:?>
+<input type="hidden" name="#arg[1]" value="pause"><input type="submit" value="Pause now" title="Stops all runs within a minute. Playback is not affected.">
+<?php endif;?>
+</form>
+<form method="POST" action="/update.php" target="progressFrame" style="display:inline" onsubmit="return confirm('Release ALL pool copies now, ignoring keep time?\n\nOnly copies with a verified identical array twin are deleted from the pool. Copies that are playing are skipped. Array files are never touched.\n\nTo stop new copies while you empty the pool, press Pause now first.');">
+<input type="hidden" name="#command" value="<?=$plugin?>/stagehand.sh">
+<input type="hidden" name="#arg[1]" value="release-all">
+<input type="submit" value="Release all now" title="Empties Stagehand's copies from the pool now. Works while paused. Array files are never touched.">
+</form>
+<?php if (!$mtlist):?>
+<form method="POST" action="/update.php" target="progressFrame" style="display:inline" onsubmit="return confirm('Back up Mover Tuning\'s config, then turn on its ignore list using the file shown under Mover Tuning below?');">
+<input type="hidden" name="#command" value="<?=$plugin?>/stagehand.sh">
+<input type="hidden" name="#arg[1]" value="enable-mover-ignore">
+<input type="submit" value="Enable in Mover Tuning">
+</form>
+<?php endif;?>
+
+<form method="POST" action="/update.php" target="progressFrame">
+<input type="hidden" name="#file" value="<?=$cfgfile?>">
+<input type="hidden" name="#command" value="<?=$plugin?>/stagehand.sh">
+<input type="hidden" name="#arg[1]" value="apply">
+<?php foreach ($sections as $title => $rows):?>
+<div class="title"><span class="left"><i class="fa fa-sliders title"></i><?=$title?></span></div>
+<?php foreach ($rows as [$key, $label, $type, $help]):?>
+<dl><dt><?=$label?>:</dt><dd>
+<?php if ($type === 'yesno') $type = ['yes', 'no'];?>
+<?php if (is_array($type)):?>
+<select name="<?=$key?>"><?php foreach ($type as $opt):?><option value="<?=$opt?>"<?=v($key) === $opt ? ' selected' : ''?>><?=$opt?></option><?php endforeach;?></select>
+<?php else:?>
+<input type="<?=$type === 'password' ? 'password' : 'text'?>" name="<?=$key?>" value="<?=v($key)?>" style="width:440px">
+<?php endif;?>
+<?php if (($defaults[$key] ?? '') !== '' && $type !== 'password'):?><span style="opacity:.6;margin-left:8px">default: <?=htmlspecialchars($defaults[$key])?></span><?php endif;?>
+</dd></dl>
+<?php if ($help):?><blockquote class="inline_help"><p><?=$help?></p></blockquote><?php endif;?>
+<?php endforeach;?>
+<?php endforeach;?>
+<script>
+// Show Sonarr/Radarr slots that are in use plus one empty slot; hide the rest.
+$(function(){
+  var shownEmpty = false;
+  for (var n = 1; n <= 6; n++) {
+    var sel = $('select[name="ARR' + n + '_TYPE"]');
+    var block = sel.closest('dl').nextUntil('div.title').addBack().add(sel.closest('dl').prevAll('div.title').first());
+    if (sel.val() === 'none') { if (shownEmpty) block.hide(); shownEmpty = true; }
+  }
+});
+</script>
+<dl><dt>&nbsp;</dt><dd><input type="submit" value="Apply"><input type="button" value="Done" onclick="done()"></dd></dl>
+</form>

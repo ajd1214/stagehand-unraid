@@ -27,7 +27,7 @@ done
 [ -z "$LC_ALL" ] && export LANG=C LC_ALL=C
 unset _l
 
-STAGEHAND_VERSION="2026.11.16b"
+STAGEHAND_VERSION="2026.11.21"
 CMD="${1:-run}"; shift || true
 CFG=""
 while [ $# -gt 0 ]; do
@@ -69,6 +69,7 @@ for _n in 1 2 3 4 5 6; do
 done
 unset _n
 : "${SCHEDULE:=no}" "${RUN_CRON:=* * * * *}" "${CLEAN_CRON:=17 * * * *}"
+: "${HEARTBEAT_MIN:=5}" "${HEARTBEAT_USERS:=no}"
 : "${NEXT_EPISODE_REGEX:=[Ss][0-9]+[Ee][0-9]+}" "${COPY_SIDECARS:=yes}" "${SIDECAR_TYPES:=srt ass ssa sub idx vtt sup}"
 
 ITEMS="$STATE_DIR/items.tsv"     # pool_path  share  rel  size  copied_epoch  last_played_epoch  reason  array_mtime
@@ -77,6 +78,7 @@ WARNED="$STATE_DIR/warned.tsv"   # key  epoch  (rate-limits repeating warnings)
 SEEN="$STATE_DIR/seen.tsv"       # share/rel  first_seen  last_seen
 NEXTCHK="$STATE_DIR/nextcheck.tsv" # share/rel  epoch  (next-episode check done for a cached title)
 LOCK="$STATE_DIR/stagehand.lock"
+SERVING="$STATE_DIR/serving.tsv" # user  served_from  server  state  share/rel-or-path  (what is playing now; rewritten only on change)
 NOW=$(date +%s)
 DRY=0; [ "$DRY_RUN" = "yes" ] && DRY=1
 MARK_BEGIN="# >>> stagehand managed block - do not edit inside >>>"
@@ -249,17 +251,17 @@ use_server() {
     v="PATH_MAP${n}"; PATH_MAP="${!v:-auto}"
   fi
 }
-# Prints "state<TAB>flag<TAB>host_path<TAB>server_number<TAB>server_path" for every server.
+# Prints "state<TAB>flag<TAB>host_path<TAB>server_number<TAB>user<TAB>server_path" for every server.
 all_sessions() {
-  local n out st fl sp host rc=0
+  local n out st fl us sp host rc=0
   for n in $(server_ids); do
     use_server "$n"
     if ! out=$(get_sessions); then printf 'ERROR\t%s\n' "server $n ($MEDIASERVER_TYPE): $out"; rc=1; continue; fi
-    while IFS=$'\t' read -r st fl sp; do
+    while IFS=$'\t' read -r st fl us sp; do
       [ -z "$sp" ] && continue
       # Empty fields would collapse when read back with IFS=tab, so use "-" placeholders.
       host=$(to_host_path "$sp") || host="-"
-      printf '%s\t%s\t%s\t%s\t%s\n' "$st" "$fl" "$host" "$n" "$sp"
+      printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$st" "$fl" "$host" "$n" "${us:--}" "$sp"
     done <<< "$out"
   done
   use_server 1
@@ -771,10 +773,10 @@ process_orphans() {
 }
 
 cmd_run() {
-  local out st fl host n sp
+  local out st fl host n us sp
   check_orphans
   out=$(all_sessions)
-  while IFS=$'\t' read -r st fl host n sp; do
+  while IFS=$'\t' read -r st fl host n us sp; do
     [ -z "$st" ] && continue
     if [ "$st" = "ERROR" ]; then log ERROR "$fl"; continue; fi
     if [ "$host" = "-" ]; then warn_once "map:$n:${sp%/*}" "server $n: no path mapping for: $sp"; continue; fi
@@ -782,6 +784,46 @@ cmd_run() {
   done <<< "$out"
   seen_prune
   update_mover_ignore
+  record_serving "$out"
+}
+
+########## now serving / heartbeat ##########
+# Where a playing file is read from right now, from open file handles in /proc only: never touches a disk.
+# Prints the /mnt/<name> holding it open (cache_media, disk3 ...), or "not-open".
+served_from() {  # host_path opens
+  local host="$1" opens="$2" share rel hit
+  IFS=$'\t' read -r share rel < <(split_share "$host") || { echo "not-open"; return; }
+  hit=$(grep -F -- "/$share/$rel" <<< "$opens" | grep -E "^/mnt/[^/]+/$share/" | grep -v '^/mnt/user0\?/' | head -1)
+  [ -n "$hit" ] || { echo "not-open"; return; }
+  hit="${hit#/mnt/}"; echo "${hit%%/*}"
+}
+short_title() { local b="${1##*/}"; b="${b%.*}"; b="${b%% \[*}"; echo "$b"; }
+# Rewrites $SERVING only when it changes (no flash or SSD wear when nothing changes); every HEARTBEAT_MIN
+# minutes logs one line per stream while something plays. Uses session data run already fetched.
+record_serving() {  # all_sessions output
+  local out="$1" st fl host n us sp opens="" from where new=""
+  if grep -qvE '^(ERROR|$)' <<< "$out"; then opens=$(open_targets); fi
+  while IFS=$'\t' read -r st fl host n us sp; do
+    [ -z "$st" ] || [ "$st" = "ERROR" ] && continue
+    if [ "$host" = "-" ]; then from="unmapped"; where="$sp"
+    else from=$(served_from "$host" "$opens"); where="${host#/mnt/user/}"; fi
+    new+="${us:--}"$'\t'"$from"$'\t'"$n"$'\t'"$st"$'\t'"$where"$'\n'
+  done <<< "$out"
+  [ "$(printf '%s' "$new")" = "$(cat "$SERVING" 2>/dev/null)" ] || printf '%s' "$new" > "$SERVING"
+  [ "${HEARTBEAT_MIN:-0}" -gt 0 ] 2>/dev/null || return 0
+  [ $(( (NOW / 60) % HEARTBEAT_MIN )) -eq 0 ] || return 0
+  local label
+  while IFS=$'\t' read -r us from n st where; do
+    [ -z "$from" ] && continue
+    case "$from" in
+      not-open) label="not read from disk right now (buffered, paused or transcoder cache)" ;;
+      unmapped) label="unmapped path" ;;
+      "$POOL")  label="from $POOL" ;;
+      disk*)    label="from array $from$( [ -f "/mnt/$POOL/$where" ] && echo ', switch pending' || echo ', copy pending')" ;;
+      *)        label="from $from" ;;
+    esac
+    log PLAYING "$(short_title "$where") [$st]$( [ "$HEARTBEAT_USERS" = "yes" ] && [ "$us" != "-" ] && echo " user $us,") server $n, $label"
+  done <<< "$new"
 }
 
 ########## clean ##########
@@ -883,10 +925,10 @@ cmd_check() {
 }
 
 cmd_explain() {  # read-only: show how each active session would be handled and why
-  local out st sp host share rel arr dst fl why n
+  local out st sp host share rel arr dst fl why n us
   out=$(SH_VERBOSE=1 all_sessions)
   [ -z "$out" ] && { echo "no active sessions with a file path"; return 0; }
-  while IFS=$'\t' read -r st fl host n sp; do
+  while IFS=$'\t' read -r st fl host n us sp; do
     [ -z "$st" ] && continue
     [ "$st" = "ERROR" ] && { echo "$fl"; continue; }
     echo "== server $n [$st${fl:+, $fl}] $sp"
@@ -1013,6 +1055,9 @@ fi
 exec 9>"$LOCK"
 if [ "$CMD" = "release-all" ]; then
   flock -w 300 9 || { echo "another Stagehand run is still busy after 5 minutes; try again" >&2; exit 1; }
+elif [ "$CMD" = "clean" ]; then
+  # clean and run both start at :17; give the short run time to finish instead of skipping clean silently.
+  flock -w 120 9 || { log WARN "clean skipped: another run held the lock for 2 minutes"; exit 0; }
 else
   flock -n 9 || exit 0
 fi

@@ -2,13 +2,13 @@
 <!DOCTYPE PLUGIN [
 <!ENTITY name      "stagehand">
 <!ENTITY author    "ajd1214">
-<!ENTITY version   "2026.11.16b">
+<!ENTITY version   "2026.11.21">
 <!ENTITY launch    "Utilities/Stagehand">
 <!ENTITY gitURL    "https://raw.githubusercontent.com/ajd1214/stagehand-unraid/main">
 <!ENTITY pluginURL "&gitURL;/stagehand.plg">
 <!ENTITY plgPATH   "/boot/config/plugins/&name;">
 <!ENTITY emhttp    "/usr/local/emhttp/plugins/&name;">
-<!ENTITY pkgSHA    "fde1e5a2b9817cca385f66e76762b0a52a15e3ac171a8c815b67d9b6ea0f874b">
+<!ENTITY pkgSHA    "e5557cc9c8b8fd48808767a2073ab6bb81c6990e6c8b66bdaada31baffc58843">
 <!ENTITY gdbPKG    "gdb-15.2-x86_64-3">
 <!ENTITY gdbSHA    "88f0417bb73d1fc6c0f6a955f0ff6b3667a17698162ba0340079c1cf9628c4a1">
 ]>
@@ -21,6 +21,11 @@
         min="7.0.0">
 
 <CHANGES>
+###2026.11.21
+- Now playing: while something plays, logs one PLAYING line per stream every 5 minutes (setting "Now-playing log interval", 0 = off) saying whether it is read from the SSD pool or an array disk. Shown on the Status section too. Read from /proc only: no extra media-server calls, never wakes a disk
+- Optional media-server user names in those lines ("Show user names", default no)
+- clean now waits up to 2 minutes for a running run instead of silently skipping when both start at :17, and logs if it still cannot run
+
 ###2026.11.16b
 - Default settings are now generic examples (only used on a new install; existing settings are kept)
 

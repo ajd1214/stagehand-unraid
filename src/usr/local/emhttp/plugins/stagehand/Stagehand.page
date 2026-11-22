@@ -136,6 +136,8 @@ $sections = [
     ['LOG_MAX_MB', 'Log size limit (MB)', 'text', 'The log is rotated when it reaches this size.'],
     ['SYSLOG', 'Also write to the Unraid system log', 'yesno', 'Copy every Stagehand log line into the Unraid system log (Tools &gt; System Log, diagnostics and any syslog server), tagged stagehand. Handy for lining up Stagehand events with other server events. No = Log tab only.'],
     ['NOTIFY', 'Unraid notifications', ['none', 'errors', 'all'], 'errors = problems and leftover files. all = also every live switch.'],
+    ['HEARTBEAT_MIN', 'Now-playing log interval (minutes)', 'text', 'While something plays, log one PLAYING line per stream every this many minutes, saying whether it is read from the SSD pool or an array disk. 0 = off. Uses what each run already knows: no extra media-server calls, never wakes a disk.'],
+    ['HEARTBEAT_USERS', 'Show user names', 'yesno', 'Include media-server user names in PLAYING lines and under Now playing on this page.'],
   ],
   'Advanced' => [
     ['SOURCE_ROOTS', 'Where originals live', 'text', 'auto = the array disks (/mnt/disk1, /mnt/disk2 ...). Only change for unusual setups: space-separated folders.'],
@@ -151,6 +153,10 @@ $cronon   = is_file("/boot/config/plugins/stagehand/stagehand.cron");
 $mtcfg    = $cfg['MOVER_TUNING_CFG'] ?? '';
 $mtlist   = is_file($mtcfg) && preg_match('/^filelistf="yes"/m', str_replace("\r", "", file_get_contents($mtcfg)));
 $gdbok    = trim(shell_exec('command -v gdb 2>/dev/null')) !== '';
+$serving  = [];
+$servfile = rtrim($cfg['STATE_DIR'] ?? '', '/') . '/serving.tsv';
+if (is_file($servfile)) foreach (file($servfile, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES) as $l) $serving[] = explode("\t", $l, 5);
+$lastrun  = @filemtime(rtrim($cfg['STATE_DIR'] ?? '', '/') . '/stagehand.lock');
 function badge($ok, $yes, $no) { return $ok ? "<span style='color:#3c3'>$yes</span>" : "<span style='color:#e22'>$no</span>"; }
 ?>
 
@@ -159,6 +165,15 @@ function badge($ok, $yes, $no) { return $ok ? "<span style='color:#3c3'>$yes</sp
 <dl><dt>Schedule:</dt><dd><?=badge($cronon, 'on', 'off')?></dd></dl>
 <dl><dt>Mover Tuning ignore list:</dt><dd><?=badge($mtlist, 'on', 'off: cached copies are not protected from the mover')?></dd></dl>
 <dl><dt>gdb (needed for live switch):</dt><dd><?=badge($gdbok, 'installed', 'missing')?></dd></dl>
+<dl><dt>Now playing:</dt><dd>
+<?php if (!$serving):?>nothing<?php else: foreach ($serving as $r): [$u, $from, $n, $st, $where] = array_pad($r, 5, '');
+  $t = preg_replace('/ \[.*$/', '', pathinfo($where, PATHINFO_FILENAME));
+  $c = $from === ($cfg['POOL'] ?? '') ? '#3c3' : (strpos($from, 'disk') === 0 ? '#e90' : 'inherit');
+  $f = $from === 'not-open' ? 'not read from disk right now' : $from;?>
+<div><?=htmlspecialchars($t)?> [<?=htmlspecialchars($st)?>]<?=(($cfg['HEARTBEAT_USERS'] ?? 'no') === 'yes' && $u !== '-') ? ' &middot; ' . htmlspecialchars($u) : ''?> &middot; <span style="color:<?=$c?>"><?=htmlspecialchars($f)?></span></div>
+<?php endforeach; endif;?>
+<?php if ($lastrun):?><span style="opacity:.6">last checked <?=date('H:i:s', $lastrun)?></span><?php endif;?>
+</dd></dl>
 
 <form method="POST" action="/update.php" target="progressFrame" style="display:inline">
 <input type="hidden" name="#command" value="<?=$plugin?>/stagehand.sh">

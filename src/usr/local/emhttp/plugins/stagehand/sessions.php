@@ -1,6 +1,6 @@
 <?php
 // Stagehand: list active media-server playback sessions.
-// Output: one line per file, "state<TAB>exact|guess<TAB>server_path".
+// Output: one line per file, "state<TAB>exact|guess<TAB>user<TAB>server_path" (user "-" when unknown).
 // "guess" = Plex reported several versions without saying which is playing.
 // Env: SH_TYPE (plex|jellyfin|emby), SH_URL, SH_TOKEN, SH_VERBOSE=1 (session summary on stderr).
 // The token is sent in a header, never in the URL, so it cannot leak into logs.
@@ -9,6 +9,8 @@ $type = getenv('SH_TYPE') ?: 'plex';
 $base = rtrim(getenv('SH_URL') ?: '', '/');
 $token = getenv('SH_TOKEN') ?: '';
 $verbose = getenv('SH_VERBOSE') === '1';
+
+function user_field($u) { $u = trim(preg_replace('/[\t\r\n]+/', ' ', (string)$u)); return $u === '' ? '-' : $u; }
 
 function fetch($url, $headers) {
     $ctx = stream_context_create(['http' => ['header' => implode("\r\n", $headers), 'timeout' => 10]]);
@@ -57,7 +59,8 @@ try {
                     $item->getName(), (string)$item['title'] ?: '?', $state ?: '?', count($files), $how,
                     $flag === 'guess' ? ', several versions' : ''));
             }
-            foreach ($files as $f) echo "$state\t$flag\t$f\n";
+            $user = user_field(isset($item->User) ? (string)$item->User['title'] : '');
+            foreach ($files as $f) echo "$state\t$flag\t$user\t$f\n";
         }
     } else {
         $path = $type === 'emby' ? '/emby/Sessions' : '/Sessions';
@@ -69,7 +72,8 @@ try {
             if (!$n || empty($n['Path'])) continue;
             $state = !empty($s['PlayState']['IsPaused']) ? 'paused' : 'playing';
             if ($verbose) fwrite(STDERR, sprintf("session: %s | %s | state=%s | files=1\n", $n['Type'] ?? '?', $n['Name'] ?? '?', $state));
-            echo "$state\texact\t{$n['Path']}\n";
+            $user = user_field($s['UserName'] ?? '');
+            echo "$state\texact\t$user\t{$n['Path']}\n";
         }
     }
 } catch (Exception $e) {
